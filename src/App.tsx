@@ -1,11 +1,15 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, ChangeEvent } from 'react';
 import JSZip from 'jszip';
 import { Timeline } from './components/Timeline';
 import { VideoPreview } from './components/VideoPreview';
 import { Recorder } from './components/Recorder';
-import { VideoObjType, VideoClip } from './types';
+import { VideoObjType, VideoClip, RecordingMode } from './types';
 import { videoDB } from './services/db';
-import { Play, Pause, SkipBack, SkipForward, Video, Download, Undo2, Redo2, Radio, ChevronDown, Archive, FileVideo, History, Trash2, AlertCircle, X } from 'lucide-react';
+import { 
+  Play, Pause, SkipBack, SkipForward, Video, Download, Undo2, Redo2, Radio, 
+  ChevronDown, Archive, FileVideo, History, Trash2, AlertCircle, X, Upload,
+  MousePointer2, ArrowRightToLine
+} from 'lucide-react';
 
 const MOCK_CLIPS: VideoObjType = [
   {
@@ -49,8 +53,8 @@ const MOCK_CLIPS: VideoObjType = [
 export default function App() {
   const [clips, setClips] = useState<VideoObjType>([]);
   const [isInitialized, setIsInitialized] = useState(false);
-  const [isRecordingMode, setIsRecordingMode] = useState(false);
   const [recordingStartTime, setRecordingStartTime] = useState(0);
+  const [recordingMode, setRecordingMode] = useState<RecordingMode>('insert');
   const [isExportMenuOpen, setIsExportMenuOpen] = useState(false);
   const [showRestorePrompt, setShowRestorePrompt] = useState(false);
   const [pendingRestoredClips, setPendingRestoredClips] = useState<VideoObjType | null>(null);
@@ -60,10 +64,13 @@ export default function App() {
   const [selectedClipIds, setSelectedClipIds] = useState<number[]>([]);
   const [downloadedClipIds, setDownloadedClipIds] = useState<number[]>([]);
   const [storageError, setStorageError] = useState<string | null>(null);
+  const [isLoading, setIsLoading] = useState(false);
+  const [loadingMessage, setLoadingMessage] = useState('');
 
   const [currentTime, setCurrentTime] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const playbackRef = useRef<number | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const totalDuration = 60;
 
   useEffect(() => {
@@ -106,6 +113,8 @@ export default function App() {
   const handleRestore = async () => {
     if (!pendingRestoredClips) return;
     
+    setIsLoading(true);
+    setLoadingMessage('Restoring session...');
     try {
       const restoredClips = await Promise.all(pendingRestoredClips.map(async (clip) => {
         if (clip.blobId) {
@@ -125,10 +134,15 @@ export default function App() {
     } catch (err) {
       console.error("Failed to restore session:", err);
       handleStartFresh();
+    } finally {
+      setIsLoading(false);
+      setLoadingMessage('');
     }
   };
 
   const handleStartFresh = async () => {
+    setIsLoading(true);
+    setLoadingMessage('Starting fresh...');
     try {
       await videoDB.clearAll();
       setClips(MOCK_CLIPS);
@@ -140,6 +154,9 @@ export default function App() {
       console.error("Failed to clear DB:", err);
       setClips(MOCK_CLIPS);
       setIsInitialized(true);
+    } finally {
+      setIsLoading(false);
+      setLoadingMessage('');
     }
   };
 
@@ -148,6 +165,68 @@ export default function App() {
     setClips(newClips);
     setFuture([]);
   }, [clips]);
+
+  const handleImportClick = () => {
+    fileInputRef.current?.click();
+  };
+
+  const handleFileChange = async (e: ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    if (!file.type.startsWith('video/')) {
+      alert('Please select a valid video file.');
+      return;
+    }
+
+    setIsLoading(true);
+    setLoadingMessage(`Importing ${file.name}...`);
+
+    try {
+      const videoUrl = URL.createObjectURL(file);
+      
+      // Get duration
+      const duration = await new Promise<number>((resolve, reject) => {
+        const video = document.createElement('video');
+        video.preload = 'metadata';
+        video.src = videoUrl;
+        video.onloadedmetadata = () => {
+          resolve(video.duration);
+        };
+        video.onerror = () => {
+          reject(new Error('Failed to load video metadata.'));
+        };
+      });
+
+      const newId = Date.now();
+      const blobId = `blob_${newId}`;
+      
+      const newClip: VideoClip = {
+        id: newId,
+        label: file.name.split('.')[0],
+        videoUrl,
+        thumbnailUrl: `https://picsum.photos/seed/${newId}/200/120`,
+        duration,
+        sourceStart: 0,
+        timelinePosition: {
+          start: currentTime,
+          end: currentTime + Math.min(duration, 5), // Default to 5s or full duration if shorter
+        },
+        blobId,
+      };
+
+      await videoDB.saveClip(newClip, file);
+      pushToHistory([...clips, newClip]);
+      setStorageError(null);
+    } catch (err: any) {
+      console.error("Failed to import clip:", err);
+      setStorageError("Failed to import clip. Your browser storage might be full or the file is corrupted.");
+    } finally {
+      setIsLoading(false);
+      setLoadingMessage('');
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    }
+  };
 
   const undo = useCallback(() => {
     if (past.length === 0) return;
@@ -292,7 +371,26 @@ export default function App() {
       blobId,
     };
 
+    // If in insert or append mode, shift all subsequent clips forward
+    let updatedClips = [...clips];
+    if (recordingMode === 'insert' || recordingMode === 'append') {
+      updatedClips = updatedClips.map(clip => {
+        if (clip.timelinePosition.start >= recordingStartTime) {
+          return {
+            ...clip,
+            timelinePosition: {
+              start: clip.timelinePosition.start + duration,
+              end: clip.timelinePosition.end + duration
+            }
+          };
+        }
+        return clip;
+      });
+    }
+
     // Save to IndexedDB (both metadata and blob)
+    setIsLoading(true);
+    setLoadingMessage('Saving recording...');
     try {
       await videoDB.saveClip(newClip, blob);
       setStorageError(null);
@@ -303,27 +401,35 @@ export default function App() {
       } else {
         setStorageError("Failed to save recording. Your browser storage might be full or restricted.");
       }
+    } finally {
+      setIsLoading(false);
+      setLoadingMessage('');
     }
 
-    pushToHistory([...clips, newClip]);
-    setIsRecordingMode(false);
+    // Apply resolveOverlaps to handle any remaining edge cases (like clips that spanned the insertion point)
+    const finalClips = resolveOverlaps(newClip, [...updatedClips, newClip]);
+    pushToHistory(finalClips);
+    setSelectedClipIds([newId]);
   };
 
-  const handleClipUpdate = (clipId: number, newStart: number) => {
+  const handleClipsUpdate = (updates: { id: number; newStart: number }[]) => {
     setClips((prev) => {
-      const clip = prev.find(c => c.id === clipId);
-      if (!clip) return prev;
-      
-      const duration = clip.timelinePosition.end - clip.timelinePosition.start;
-      const updatedClip = {
-        ...clip,
-        timelinePosition: {
-          start: newStart,
-          end: newStart + duration,
-        },
-      };
-      
-      return resolveOverlaps(updatedClip, prev);
+      const nextClips = [...prev];
+      updates.forEach(({ id, newStart }) => {
+        const index = nextClips.findIndex(c => c.id === id);
+        if (index !== -1) {
+          const clip = nextClips[index];
+          const duration = clip.timelinePosition.end - clip.timelinePosition.start;
+          nextClips[index] = {
+            ...clip,
+            timelinePosition: {
+              start: newStart,
+              end: newStart + duration,
+            },
+          };
+        }
+      });
+      return nextClips;
     });
   };
 
@@ -439,41 +545,45 @@ export default function App() {
   };
 
   const handleRippleDelete = () => {
-    let clipToDelete: VideoClip | undefined;
+    let clipsToDelete: VideoClip[] = [];
     
-    if (selectedClipIds.length === 1) {
-      clipToDelete = clips.find(c => c.id === selectedClipIds[0]);
-    } else if (selectedClipIds.length === 0) {
-      clipToDelete = clips.find(
+    if (selectedClipIds.length > 0) {
+      clipsToDelete = clips.filter(c => selectedClipIds.includes(c.id));
+    } else {
+      const clipUnderPlayhead = clips.find(
         (c) => currentTime >= c.timelinePosition.start && currentTime <= c.timelinePosition.end
       );
-    } else {
-      // Ripple delete with multiple selection is ambiguous, 
-      // let's just do it for the first one or ignore for now.
-      // For simplicity, we'll only support ripple delete for single selection.
-      return;
+      if (clipUnderPlayhead) clipsToDelete = [clipUnderPlayhead];
     }
 
-    if (clipToDelete) {
-      const duration = clipToDelete.timelinePosition.end - clipToDelete.timelinePosition.start;
-      const newState = clips
-        .filter((c) => c.id !== clipToDelete.id)
-        .map((c) => {
-          if (c.timelinePosition.start >= clipToDelete.timelinePosition.end) {
+    if (clipsToDelete.length > 0) {
+      let newState = [...clips];
+      
+      // Sort clips to delete by start time descending to shift correctly
+      const sortedToDelete = [...clipsToDelete].sort((a, b) => b.timelinePosition.start - a.timelinePosition.start);
+      
+      sortedToDelete.forEach(clip => {
+        const duration = clip.timelinePosition.end - clip.timelinePosition.start;
+        const start = clip.timelinePosition.start;
+        
+        newState = newState.filter(c => c.id !== clip.id).map(c => {
+          if (c.timelinePosition.start >= start) {
             return {
               ...c,
               timelinePosition: {
-                start: c.timelinePosition.start - duration,
-                end: c.timelinePosition.end - duration,
-              },
+                start: Math.max(0, c.timelinePosition.start - duration),
+                end: Math.max(0, c.timelinePosition.end - duration)
+              }
             };
           }
           return c;
         });
-      
-      const otherClipsUsingBlob = newState.some(c => c.blobId === clipToDelete!.blobId);
-      videoDB.deleteClip(clipToDelete.id, !otherClipsUsingBlob ? clipToDelete.blobId : undefined);
-      
+        
+        // Cleanup IndexedDB
+        const otherClipsUsingBlob = newState.some(c => c.blobId === clip.blobId);
+        videoDB.deleteClip(clip.id, !otherClipsUsingBlob ? clip.blobId : undefined);
+      });
+
       pushToHistory(newState);
       setSelectedClipIds([]);
     }
@@ -485,6 +595,8 @@ export default function App() {
   };
 
   const handleClipDownload = async (clip: VideoClip) => {
+    setIsLoading(true);
+    setLoadingMessage(`Downloading ${clip.label}...`);
     try {
       const isExternal = clip.videoUrl.startsWith('http');
       const downloadUrl = isExternal 
@@ -514,11 +626,16 @@ export default function App() {
       a.click();
       document.body.removeChild(a);
       setDownloadedClipIds(prev => prev.includes(clip.id) ? prev : [...prev, clip.id]);
+    } finally {
+      setIsLoading(false);
+      setLoadingMessage('');
     }
   };
 
   const handleExportZip = async () => {
     setIsExportMenuOpen(false);
+    setIsLoading(true);
+    setLoadingMessage('Preparing ZIP export...');
     const zip = new JSZip();
     const folder = zip.folder("exported_clips");
     let hasErrors = false;
@@ -547,6 +664,7 @@ export default function App() {
     await Promise.all(downloadPromises);
 
     if (folder && Object.keys(folder.files).length > 0) {
+      setLoadingMessage('Generating ZIP file...');
       const content = await zip.generateAsync({ type: "blob" });
       const url = URL.createObjectURL(content);
       const a = document.createElement('a');
@@ -572,6 +690,8 @@ export default function App() {
     }
     
     setIsExportMenuOpen(false);
+    setIsLoading(false);
+    setLoadingMessage('');
   };
 
   const handleExportSingle = () => {
@@ -589,12 +709,31 @@ export default function App() {
 
       const key = e.key.toLowerCase();
       const isShift = e.shiftKey;
-      const isAlt = e.altKey || e.metaKey; // metaKey for Mac Cmd
+      const isAlt = e.altKey;
+      const isMod = e.ctrlKey || e.metaKey;
 
-      // r: Start recording
-      if (key === 'r' && !isShift) {
+      // Mod + I: Import clip
+      if (key === 'i' && isMod && !isAlt) {
         e.preventDefault();
-        if (!isRecordingMode) setIsRecordingMode(true);
+        handleImportClick();
+      }
+
+      // Mod + A: Select All
+      if (key === 'a' && isMod && !isShift && !isAlt) {
+        e.preventDefault();
+        setSelectedClipIds(clips.map(c => c.id));
+      }
+
+      // Alt + I: Insert Mode
+      if (key === 'i' && isShift) {
+        e.preventDefault();
+        setRecordingMode('insert');
+      }
+
+      // Alt + A: Append Mode
+      if (key === 'a' && isShift) {
+        e.preventDefault();
+        setRecordingMode('append');
       }
 
       // p: Play/Pause
@@ -626,6 +765,12 @@ export default function App() {
       if (e.code === 'Space') {
         e.preventDefault();
         togglePlay();
+      }
+
+      // Escape: Deselect all
+      if (key === 'escape') {
+        e.preventDefault();
+        setSelectedClipIds([]);
       }
 
       // x: Delete
@@ -664,12 +809,12 @@ export default function App() {
       }
 
       // Undo/Redo
-      if ((e.ctrlKey || e.metaKey) && key === 'z') {
+      if (isMod && key === 'z') {
         e.preventDefault();
         if (isShift) redo();
         else undo();
       }
-      if ((e.ctrlKey || e.metaKey) && key === 'y') {
+      if (isMod && key === 'y') {
         e.preventDefault();
         redo();
       }
@@ -690,9 +835,9 @@ export default function App() {
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [
-    isRecordingMode, 
     clips, 
     currentTime, 
+    recordingMode,
     selectedClipIds, 
     isPlaying, 
     totalDuration, 
@@ -704,7 +849,8 @@ export default function App() {
     redo, 
     handleExportZip, 
     handleExportSingle, 
-    handleClipDownload
+    handleClipDownload,
+    handleImportClick
   ]);
 
   return (
@@ -766,6 +912,19 @@ export default function App() {
             </div>
             <h1 className="text-sm font-semibold tracking-tight">Studio Recorder</h1>
           </div>
+
+          {selectedClipIds.length > 0 && (
+            <div className="flex items-center space-x-2 bg-blue-600/20 text-blue-400 px-2 py-1 rounded border border-blue-600/30 animate-in fade-in duration-300">
+              <span className="text-[10px] font-bold uppercase tracking-wider">{selectedClipIds.length} selected</span>
+              <button 
+                onClick={() => setSelectedClipIds([])}
+                className="hover:text-white transition-colors"
+                title="Deselect All (Esc)"
+              >
+                <X size={12} />
+              </button>
+            </div>
+          )}
           
           {/* Undo/Redo Controls */}
           <div className="flex items-center space-x-1 border-l border-white/10 pl-6">
@@ -773,7 +932,7 @@ export default function App() {
               onClick={undo}
               disabled={past.length === 0}
               className="p-2 hover:bg-white/5 rounded-md transition-colors text-gray-400 hover:text-white disabled:opacity-20 disabled:cursor-not-allowed"
-              title="Undo (Ctrl+Z)"
+              title="Undo (Ctrl/Cmd + Z)"
             >
               <Undo2 size={18} />
             </button>
@@ -781,7 +940,7 @@ export default function App() {
               onClick={redo}
               disabled={future.length === 0}
               className="p-2 hover:bg-white/5 rounded-md transition-colors text-gray-400 hover:text-white disabled:opacity-20 disabled:cursor-not-allowed"
-              title="Redo (Ctrl+Shift+Z)"
+              title="Redo (Ctrl/Cmd + Shift + Z or Ctrl/Cmd + Y)"
             >
               <Redo2 size={18} />
             </button>
@@ -789,16 +948,41 @@ export default function App() {
         </div>
 
         <div className="flex items-center space-x-4">
+          {/* Recording Mode Toggles */}
+          <div className="flex items-center bg-white/5 rounded-md p-0.5 border border-white/10">
+            <button
+              onClick={() => setRecordingMode('insert')}
+              className={`flex items-center space-x-1.5 px-2.5 py-1 rounded-sm text-[10px] font-medium transition-all ${
+                recordingMode === 'insert' 
+                  ? 'bg-blue-600 text-white shadow-sm' 
+                  : 'text-gray-400 hover:text-gray-200'
+              }`}
+              title="Insert Mode (Shift+I): Record at playhead"
+            >
+              <MousePointer2 size={12} />
+              <span>Insert</span>
+            </button>
+            <button
+              onClick={() => setRecordingMode('append')}
+              className={`flex items-center space-x-1.5 px-2.5 py-1 rounded-sm text-[10px] font-medium transition-all ${
+                recordingMode === 'append' 
+                  ? 'bg-blue-600 text-white shadow-sm' 
+                  : 'text-gray-400 hover:text-gray-200'
+              }`}
+              title="Append Mode (Shift+A): Record at end of timeline"
+            >
+              <ArrowRightToLine size={12} />
+              <span>Append</span>
+            </button>
+          </div>
+
           <button 
-            onClick={() => {
-              setIsPlaying(false);
-              setRecordingStartTime(currentTime);
-              setIsRecordingMode(true);
-            }}
-            className="flex items-center space-x-2 bg-red-600/10 hover:bg-red-600/20 text-red-500 px-3 py-1.5 rounded-md text-xs font-medium border border-red-500/20 transition-colors"
+            onClick={handleImportClick}
+            className="flex items-center space-x-2 bg-white/5 hover:bg-white/10 text-gray-300 px-3 py-1.5 rounded-md text-xs font-medium border border-white/10 transition-colors"
+            title="Import Video (Ctrl/Cmd + I)"
           >
-            <Radio size={14} className="animate-pulse" />
-            <span>Record</span>
+            <Upload size={14} />
+            <span>Import</span>
           </button>
           <button className="text-xs text-gray-400 hover:text-white transition-colors">Project Settings</button>
           
@@ -840,44 +1024,89 @@ export default function App() {
         </div>
       </header>
 
+      {/* Global Loader */}
+      {isLoading && (
+        <div className="fixed inset-0 z-[300] bg-black/60 backdrop-blur-sm flex items-center justify-center">
+          <div className="bg-[#1A1A1A] border border-white/10 rounded-2xl p-8 flex flex-col items-center space-y-4 shadow-2xl animate-in zoom-in duration-300">
+            <div className="relative w-12 h-12">
+              <div className="absolute inset-0 border-4 border-blue-600/20 rounded-full" />
+              <div className="absolute inset-0 border-4 border-blue-600 border-t-transparent rounded-full animate-spin" />
+            </div>
+            <div className="flex flex-col items-center">
+              <span className="text-sm font-medium text-white">{loadingMessage || 'Processing...'}</span>
+              <span className="text-[10px] text-gray-500 mt-1">Please wait a moment</span>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Main Content Area */}
-      <main className="flex-grow flex flex-col items-center justify-center p-8 bg-gradient-to-b from-[#1A1A1A] to-[#0D0D0D]">
-        {/* Video Preview Area */}
-        <div className="w-full max-w-4xl aspect-video relative group">
-          <VideoPreview 
-            clips={clips} 
-            currentTime={currentTime} 
-            isPlaying={isPlaying} 
-          />
-          
-          {/* Overlay Play Button (Visible on hover or when paused) */}
-          {!isPlaying && (
-            <div className="absolute inset-0 flex items-center justify-center z-30 bg-black/20 group-hover:bg-black/40 transition-colors pointer-events-none">
-              <div 
-                className="w-16 h-16 bg-white/10 backdrop-blur-md rounded-full flex items-center justify-center border border-white/20 scale-110 pointer-events-auto cursor-pointer" 
-                onClick={togglePlay}
-              >
-                <Play size={32} className="ml-1" />
+      <main className="flex-grow flex items-center justify-center p-8 bg-gradient-to-b from-[#1A1A1A] to-[#0D0D0D] overflow-hidden">
+        <div className="w-full max-w-7xl grid grid-cols-2 gap-8">
+          {/* Left Side: Recorder */}
+          <div className="animate-in slide-in-from-left duration-500">
+            <Recorder 
+              onRecordingComplete={handleRecordingComplete}
+              onStartRecording={() => {
+                setIsPlaying(false);
+                if (recordingMode === 'insert') {
+                  setRecordingStartTime(currentTime);
+                } else {
+                  let appendTime = 0;
+                  const selectedClips = clips.filter(c => selectedClipIds.includes(c.id));
+                  if (selectedClips.length > 0) {
+                    // Append to the end of the last selected clip (by timeline position)
+                    appendTime = Math.max(...selectedClips.map(c => c.timelinePosition.end));
+                  } else {
+                    // Append to the end of the timeline
+                    appendTime = clips.reduce((max, clip) => Math.max(max, clip.timelinePosition.end), 0);
+                  }
+                  setRecordingStartTime(appendTime);
+                  setCurrentTime(appendTime);
+                }
+              }}
+            />
+          </div>
+
+          {/* Right Side: Video Preview Area */}
+          <div className="flex flex-col items-center justify-center">
+            <div className="w-full aspect-video relative group rounded-2xl overflow-hidden border border-white/10 shadow-2xl">
+              <VideoPreview 
+                clips={clips} 
+                currentTime={currentTime} 
+                isPlaying={isPlaying} 
+              />
+              
+              {/* Overlay Play Button (Visible on hover or when paused) */}
+              {!isPlaying && (
+                <div className="absolute inset-0 flex items-center justify-center z-30 bg-black/20 group-hover:bg-black/40 transition-colors pointer-events-none">
+                  <div 
+                    className="w-16 h-16 bg-white/10 backdrop-blur-md rounded-full flex items-center justify-center border border-white/20 scale-110 pointer-events-auto cursor-pointer" 
+                    onClick={togglePlay}
+                  >
+                    <Play size={32} className="ml-1" />
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Playback Controls */}
+            <div className="mt-8 flex items-center space-x-8">
+              <div className="flex items-center space-x-4">
+                <button onClick={reset} className="p-2 hover:bg-white/5 rounded-full transition-colors text-gray-400 hover:text-white">
+                  <SkipBack size={20} />
+                </button>
+                <button 
+                  onClick={togglePlay}
+                  className="w-12 h-12 bg-white text-black rounded-full flex items-center justify-center hover:bg-gray-200 transition-colors shadow-lg"
+                >
+                  {isPlaying ? <Pause size={24} /> : <Play size={24} className="ml-1" />}
+                </button>
+                <button className="p-2 hover:bg-white/5 rounded-full transition-colors text-gray-400 hover:text-white">
+                  <SkipForward size={20} />
+                </button>
               </div>
             </div>
-          )}
-        </div>
-
-        {/* Playback Controls */}
-        <div className="mt-8 flex items-center space-x-8">
-          <div className="flex items-center space-x-4">
-            <button onClick={reset} className="p-2 hover:bg-white/5 rounded-full transition-colors text-gray-400 hover:text-white">
-              <SkipBack size={20} />
-            </button>
-            <button 
-              onClick={togglePlay}
-              className="w-12 h-12 bg-white text-black rounded-full flex items-center justify-center hover:bg-gray-200 transition-colors shadow-lg"
-            >
-              {isPlaying ? <Pause size={24} /> : <Play size={24} className="ml-1" />}
-            </button>
-            <button className="p-2 hover:bg-white/5 rounded-full transition-colors text-gray-400 hover:text-white">
-              <SkipForward size={20} />
-            </button>
           </div>
         </div>
       </main>
@@ -891,7 +1120,7 @@ export default function App() {
             setCurrentTime(time);
             if (isPlaying) setIsPlaying(false);
           }}
-          onClipUpdate={handleClipUpdate}
+          onClipsUpdate={handleClipsUpdate}
           onClipTrim={handleClipTrim}
           onClipRename={handleClipRename}
           onClipDownload={handleClipDownload}
@@ -907,13 +1136,14 @@ export default function App() {
         />
       </section>
 
-      {/* Recorder Overlay */}
-      {isRecordingMode && (
-        <Recorder 
-          onRecordingComplete={handleRecordingComplete}
-          onClose={() => setIsRecordingMode(false)}
-        />
-      )}
+      {/* Hidden File Input for Import */}
+      <input 
+        type="file" 
+        ref={fileInputRef} 
+        onChange={handleFileChange} 
+        accept="video/*" 
+        className="hidden" 
+      />
     </div>
   );
 }

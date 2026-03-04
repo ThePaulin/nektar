@@ -96,7 +96,8 @@ export const ThumbnailStrip: React.FC<ThumbnailStripProps> = ({
             key={i}
             src={src}
             alt=""
-            className="h-full object-cover border-r border-gray-800 last:border-r-0"
+            draggable={false}
+            className="h-full object-cover border-r border-gray-800 last:border-r-0 select-none"
             style={{ width: thumbnailWidth }}
             referrerPolicy="no-referrer"
           />

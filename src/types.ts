@@ -15,3 +15,5 @@ export interface VideoClip {
 }
 
 export type VideoObjType = VideoClip[];
+
+export type RecordingMode = 'insert' | 'append';
