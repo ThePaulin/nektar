@@ -1,16 +1,23 @@
 import React, { useRef, useEffect, useState } from 'react';
 import { motion } from 'motion/react';
-import { Plus, Scissors, Trash2, ZoomIn, ZoomOut, Download, CheckCircle2 } from 'lucide-react';
-import { VideoClip, VideoObjType } from '../types';
+import { 
+  Plus, Scissors, Trash2, ZoomIn, ZoomOut, Download, CheckCircle2, 
+  Eye, EyeOff, Lock, Unlock, Volume2, VolumeX, MoreVertical, Copy, Trash
+} from 'lucide-react';
+import { VideoClip, VideoObjType, Track, TrackType } from '../types';
 import { ThumbnailStrip } from './ThumbnailStrip';
 
 interface TimelineProps {
   clips: VideoObjType;
+  tracks: Track[];
+  selectedTrackId: string;
   currentTime: number;
   onTimeChange: (time: number) => void;
-  onClipsUpdate?: (updates: { id: number; newStart: number }[]) => void;
+  onClipsUpdate?: (updates: { id: number; newStart: number; newTrackId?: string }[]) => void;
   onClipTrim?: (clipId: number, side: 'left' | 'right', newTime: number) => void;
   onClipRename?: (clipId: number, newLabel: string) => void;
+  onClipContentUpdate?: (clipId: number, newContent: string) => void;
+  onClipUpdate?: (clipId: number, updates: Partial<VideoClip>) => void;
   onClipDownload?: (clip: VideoClip) => void;
   onManipulationStart?: () => void;
   onManipulationEnd?: () => void;
@@ -20,12 +27,22 @@ interface TimelineProps {
   selectedClipIds?: number[];
   downloadedClipIds?: number[];
   onSelectionChange?: (ids: number[]) => void;
+  onTrackSelect: (id: string) => void;
+  onTrackUpdate: (id: string, updates: Partial<Track>) => void;
+  onTrackDelete: (id: string) => void;
+  onTrackDuplicate: (id: string) => void;
+  onAddTrack: (type: TrackType) => void;
   initialPixelsPerSecond?: number;
   totalDuration?: number;
 }
 
+const TRACK_HEIGHT = 80;
+const TRACK_HEADER_WIDTH = 200;
+
 export const Timeline: React.FC<TimelineProps> = ({
   clips,
+  tracks,
+  selectedTrackId,
   currentTime,
   onTimeChange,
   onClipsUpdate,
@@ -40,10 +57,20 @@ export const Timeline: React.FC<TimelineProps> = ({
   selectedClipIds = [],
   downloadedClipIds = [],
   onSelectionChange,
+  onTrackSelect,
+  onTrackUpdate,
+  onTrackDelete,
+  onTrackDuplicate,
+  onAddTrack,
+  onAddTextClip,
+  onClipContentUpdate,
+  onClipUpdate,
   initialPixelsPerSecond = 40,
-  totalDuration = 60, // Default 60 seconds
+  totalDuration = 60,
 }) => {
-  const containerRef = useRef<HTMLDivElement>(null);
+  const tracksScrollRef = useRef<HTMLDivElement>(null);
+  const headerScrollRef = useRef<HTMLDivElement>(null);
+  const timelineRootRef = useRef<HTMLDivElement>(null);
   const [isDraggingPlayhead, setIsDraggingPlayhead] = useState(false);
   const [draggingClipId, setDraggingClipId] = useState<number | null>(null);
   const [trimmingClipId, setTrimmingClipId] = useState<{ id: number; side: 'left' | 'right' } | null>(null);
@@ -52,7 +79,7 @@ export const Timeline: React.FC<TimelineProps> = ({
   const [editingClipId, setEditingClipId] = useState<number | null>(null);
   const [editValue, setEditValue] = useState('');
   const [snappedPoint, setSnappedPoint] = useState<number | null>(null);
-  const [initialDragPositions, setInitialDragPositions] = useState<{ [id: number]: number }>({});
+  const [initialDragPositions, setInitialDragPositions] = useState<{ [id: number]: { start: number; trackId: string } }>({});
   const [selectionRect, setSelectionRect] = useState<{ startX: number; startY: number; endX: number; endY: number } | null>(null);
   const [isSelecting, setIsSelecting] = useState(false);
   const [hasDragged, setHasDragged] = useState(false);
@@ -61,13 +88,36 @@ export const Timeline: React.FC<TimelineProps> = ({
 
   const SNAP_THRESHOLD_PX = 10;
 
-  // Playhead centering logic on zoom
   useEffect(() => {
-    if (containerRef.current) {
-      const viewportWidth = containerRef.current.clientWidth;
+    const timelineEl = timelineRootRef.current;
+    if (!timelineEl) return;
+
+    const handleWheel = (e: WheelEvent) => {
+      // If we are scrolling horizontally
+      if (Math.abs(e.deltaX) > Math.abs(e.deltaY)) {
+        const tracksEl = tracksScrollRef.current;
+        if (tracksEl) {
+          // Prevent default to block browser navigation gestures
+          e.preventDefault();
+          // Manually update scroll position
+          tracksEl.scrollLeft += e.deltaX;
+        }
+      }
+    };
+
+    timelineEl.addEventListener('wheel', handleWheel, { passive: false });
+    return () => timelineEl.removeEventListener('wheel', handleWheel);
+  }, []);
+
+  useEffect(() => {
+    if (tracksScrollRef.current) {
+      const viewportWidth = tracksScrollRef.current.clientWidth;
       const playheadPos = currentTime * pixelsPerSecond;
       const newScrollLeft = playheadPos - viewportWidth / 2;
-      containerRef.current.scrollLeft = newScrollLeft;
+      tracksScrollRef.current.scrollLeft = newScrollLeft;
+      if (headerScrollRef.current) {
+        headerScrollRef.current.scrollLeft = newScrollLeft;
+      }
     }
   }, [pixelsPerSecond]);
 
@@ -82,13 +132,12 @@ export const Timeline: React.FC<TimelineProps> = ({
   };
 
   const handlePlayheadDrag = (e: MouseEvent | TouchEvent) => {
-    if (isDraggingPlayhead && containerRef.current) {
-      const rect = containerRef.current.getBoundingClientRect();
+    if (isDraggingPlayhead && tracksScrollRef.current) {
+      const rect = tracksScrollRef.current.getBoundingClientRect();
       const clientX = 'touches' in e ? e.touches[0].clientX : e.clientX;
-      const x = clientX - rect.left + containerRef.current.scrollLeft;
+      const x = clientX - rect.left + tracksScrollRef.current.scrollLeft;
       let newTime = Math.max(0, Math.min(totalDuration, x / pixelsPerSecond));
 
-      // Snapping for playhead
       const snapPoints = [0, totalDuration, ...clips.flatMap(c => [c.timelinePosition.start, c.timelinePosition.end])];
       let foundSnap = false;
       for (const point of snapPoints) {
@@ -106,19 +155,22 @@ export const Timeline: React.FC<TimelineProps> = ({
   };
 
   const handleClipDrag = (e: MouseEvent | TouchEvent) => {
-    if (draggingClipId !== null && containerRef.current && onClipsUpdate) {
-      const anchorInitialPos = initialDragPositions[draggingClipId];
-      if (anchorInitialPos === undefined) return;
+    if (draggingClipId !== null && tracksScrollRef.current && onClipsUpdate) {
+      const anchorInitial = initialDragPositions[draggingClipId];
+      if (!anchorInitial) return;
 
       setHasDragged(true);
-      const rect = containerRef.current.getBoundingClientRect();
+      const rect = tracksScrollRef.current.getBoundingClientRect();
       const clientX = 'touches' in e ? e.touches[0].clientX : e.clientX;
-      const x = clientX - rect.left + containerRef.current.scrollLeft;
+      const clientY = 'touches' in e ? e.touches[0].clientY : e.clientY;
+      
+      const x = clientX - rect.left + tracksScrollRef.current.scrollLeft;
+      const y = clientY - rect.top;
       
       let newAnchorStart = (x - dragOffset) / pixelsPerSecond;
       if (isNaN(newAnchorStart)) return;
 
-      // Snapping logic for the anchor clip
+      // Snapping logic
       const otherClips = clips.filter(c => !selectedClipIds.includes(c.id));
       const snapPoints = [0, currentTime, ...otherClips.flatMap(c => [c.timelinePosition.start, c.timelinePosition.end])].filter(p => !isNaN(p));
       const anchorClip = clips.find(c => c.id === draggingClipId);
@@ -127,14 +179,12 @@ export const Timeline: React.FC<TimelineProps> = ({
       if (anchorClip) {
         const duration = anchorClip.timelinePosition.end - anchorClip.timelinePosition.start;
         for (const point of snapPoints) {
-          // Snap start of clip
           if (Math.abs(newAnchorStart * pixelsPerSecond - point * pixelsPerSecond) < SNAP_THRESHOLD_PX) {
             newAnchorStart = point;
             setSnappedPoint(point);
             foundSnap = true;
             break;
           }
-          // Snap end of clip
           if (Math.abs((newAnchorStart + duration) * pixelsPerSecond - point * pixelsPerSecond) < SNAP_THRESHOLD_PX) {
             newAnchorStart = point - duration;
             setSnappedPoint(point);
@@ -145,26 +195,39 @@ export const Timeline: React.FC<TimelineProps> = ({
       }
       if (!foundSnap) setSnappedPoint(null);
 
-      const delta = newAnchorStart - anchorInitialPos;
-      if (isNaN(delta)) return;
+      const deltaX = newAnchorStart - anchorInitial.start;
       
-      const updates = selectedClipIds.map(id => ({
-        id,
-        newStart: Math.max(0, (initialDragPositions[id] ?? 0) + delta)
-      })).filter(u => !isNaN(u.newStart));
+      // Track switching logic
+      const trackIndex = Math.floor(y / TRACK_HEIGHT);
+      const targetTrack = tracks[trackIndex];
+      let newTrackId = anchorInitial.trackId;
+      
+      if (targetTrack && anchorClip && targetTrack.type === anchorClip.type) {
+        newTrackId = targetTrack.id;
+      }
+
+      const updates = selectedClipIds.map((id): { id: number; newStart: number; newTrackId?: string } | null => {
+        const initial = initialDragPositions[id];
+        if (!initial) return null;
+        
+        return {
+          id,
+          newStart: Math.max(0, initial.start + deltaX),
+          newTrackId: id === draggingClipId ? newTrackId : undefined
+        };
+      }).filter((u): u is { id: number; newStart: number; newTrackId?: string } => u !== null);
 
       onClipsUpdate(updates);
     }
   };
 
   const handleTrimDrag = (e: MouseEvent | TouchEvent) => {
-    if (trimmingClipId !== null && containerRef.current && onClipTrim) {
-      const rect = containerRef.current.getBoundingClientRect();
+    if (trimmingClipId !== null && tracksScrollRef.current && onClipTrim) {
+      const rect = tracksScrollRef.current.getBoundingClientRect();
       const clientX = 'touches' in e ? e.touches[0].clientX : e.clientX;
-      const x = clientX - rect.left + containerRef.current.scrollLeft;
+      const x = clientX - rect.left + tracksScrollRef.current.scrollLeft;
       let newTime = x / pixelsPerSecond;
 
-      // Snapping for trim
       const snapPoints = [0, currentTime, ...clips.flatMap(c => c.id !== trimmingClipId.id ? [c.timelinePosition.start, c.timelinePosition.end] : [])];
       let foundSnap = false;
       for (const point of snapPoints) {
@@ -205,10 +268,10 @@ export const Timeline: React.FC<TimelineProps> = ({
 
   useEffect(() => {
     const handleMouseMove = (e: MouseEvent) => {
-      if (!isSelecting || !containerRef.current || !selectionStartRef.current) return;
+      if (!isSelecting || !tracksScrollRef.current || !selectionStartRef.current) return;
       
-      const rect = containerRef.current.getBoundingClientRect();
-      const x = e.clientX - rect.left + containerRef.current.scrollLeft;
+      const rect = tracksScrollRef.current.getBoundingClientRect();
+      const x = e.clientX - rect.left + tracksScrollRef.current.scrollLeft;
       const y = e.clientY - rect.top;
       
       const startX = selectionStartRef.current.x;
@@ -226,10 +289,9 @@ export const Timeline: React.FC<TimelineProps> = ({
           const clipX1 = clip.timelinePosition.start * pixelsPerSecond;
           const clipX2 = clip.timelinePosition.end * pixelsPerSecond;
           
-          // Correct Y coordinates relative to containerRef
-          // h-8 (32px) + mt-4 (16px) + top-4 (16px) = 64px
-          const clipY1 = 64; 
-          const clipY2 = 64 + 80; // h-20 is 80px
+          const trackIndex = tracks.findIndex(t => t.id === clip.trackId);
+          const clipY1 = trackIndex * TRACK_HEIGHT;
+          const clipY2 = clipY1 + TRACK_HEIGHT;
           
           return (
             clipX1 < x2 &&
@@ -240,7 +302,6 @@ export const Timeline: React.FC<TimelineProps> = ({
         }).map(c => c.id);
 
         if (e.shiftKey) {
-          // Add marquee selection to initial selection (avoid duplicates)
           const combined = Array.from(new Set([...initialSelectionRef.current, ...marqueeSelectedIds]));
           onSelectionChange(combined);
         } else {
@@ -265,7 +326,7 @@ export const Timeline: React.FC<TimelineProps> = ({
       window.removeEventListener('mousemove', handleMouseMove);
       window.removeEventListener('mouseup', handleMouseUp);
     };
-  }, [isSelecting, clips, pixelsPerSecond, onSelectionChange]);
+  }, [isSelecting, clips, pixelsPerSecond, onSelectionChange, tracks]);
 
   useEffect(() => {
     const onPlayheadMouseUp = () => {
@@ -292,38 +353,25 @@ export const Timeline: React.FC<TimelineProps> = ({
     if (isDraggingPlayhead) {
       window.addEventListener('mousemove', handlePlayheadDrag);
       window.addEventListener('mouseup', onPlayheadMouseUp);
-      window.addEventListener('touchmove', handlePlayheadDrag);
-      window.addEventListener('touchend', onPlayheadMouseUp);
     }
     if (draggingClipId !== null) {
       window.addEventListener('mousemove', handleClipDrag);
       window.addEventListener('mouseup', onClipMouseUp);
-      window.addEventListener('touchmove', handleClipDrag);
-      window.addEventListener('touchend', onClipMouseUp);
     }
     if (trimmingClipId !== null) {
       window.addEventListener('mousemove', handleTrimDrag);
       window.addEventListener('mouseup', onTrimMouseUp);
-      window.addEventListener('touchmove', handleTrimDrag);
-      window.addEventListener('touchend', onTrimMouseUp);
     }
     return () => {
       window.removeEventListener('mousemove', handlePlayheadDrag);
       window.removeEventListener('mouseup', onPlayheadMouseUp);
-      window.removeEventListener('touchmove', handlePlayheadDrag);
-      window.removeEventListener('touchend', onPlayheadMouseUp);
       window.removeEventListener('mousemove', handleClipDrag);
       window.removeEventListener('mouseup', onClipMouseUp);
-      window.removeEventListener('touchmove', handleClipDrag);
-      window.removeEventListener('touchend', onClipMouseUp);
       window.removeEventListener('mousemove', handleTrimDrag);
       window.removeEventListener('mouseup', onTrimMouseUp);
-      window.removeEventListener('touchmove', handleTrimDrag);
-      window.removeEventListener('touchend', onTrimMouseUp);
     };
   }, [isDraggingPlayhead, draggingClipId, trimmingClipId, pixelsPerSecond, handlePlayheadDrag, handleClipDrag, handleTrimDrag, hasDragged, onSelectionChange, onManipulationEnd]);
 
-  // Generate ruler ticks dynamically based on zoom
   const getTickInterval = () => {
     if (pixelsPerSecond < 10) return 10;
     if (pixelsPerSecond < 20) return 5;
@@ -344,48 +392,77 @@ export const Timeline: React.FC<TimelineProps> = ({
   };
 
   const handleTimelineMouseDown = (e: React.MouseEvent) => {
-    if (containerRef.current) {
-      const rect = containerRef.current.getBoundingClientRect();
-      const x = e.clientX - rect.left + containerRef.current.scrollLeft;
+    if (tracksScrollRef.current) {
+      const rect = tracksScrollRef.current.getBoundingClientRect();
+      const x = e.clientX - rect.left + tracksScrollRef.current.scrollLeft;
       const y = e.clientY - rect.top;
 
-      // Move playhead
-      const newTime = Math.max(0, Math.min(totalDuration, x / pixelsPerSecond));
-      onTimeChange(newTime);
+      onTimeChange(Math.max(0, Math.min(totalDuration, x / pixelsPerSecond)));
 
-      // Start marquee selection
       setIsSelecting(true);
       selectionStartRef.current = { x, y };
       initialSelectionRef.current = e.shiftKey ? [...selectedClipIds] : [];
       setSelectionRect({ startX: x, startY: y, endX: x, endY: y });
       
-      // Clear selection if no modifier
       if (onSelectionChange && !e.shiftKey) {
         onSelectionChange([]);
       }
     }
   };
 
+  const handleTracksScroll = (e: React.UIEvent<HTMLDivElement>) => {
+    if (headerScrollRef.current) {
+      headerScrollRef.current.scrollLeft = e.currentTarget.scrollLeft;
+    }
+  };
+
+  const startEditing = (clip: VideoClip) => {
+    setEditingClipId(clip.id);
+    setEditValue(clip.type === TrackType.TEXT || clip.type === TrackType.SUBTITLE ? (clip.content || '') : clip.label);
+  };
+
+  const saveEdit = (clipId: number) => {
+    const clip = clips.find(c => c.id === clipId);
+    if (!clip) return;
+
+    if (clip.type === TrackType.TEXT || clip.type === TrackType.SUBTITLE) {
+      const newLabel = editValue.slice(0, 20) + (editValue.length > 20 ? '...' : '');
+      if (onClipUpdate) {
+        onClipUpdate(clipId, { content: editValue, label: newLabel });
+      } else {
+        if (onClipContentUpdate) onClipContentUpdate(clipId, editValue);
+        if (onClipRename) onClipRename(clipId, newLabel);
+      }
+    } else {
+      if (editValue.trim()) {
+        if (onClipUpdate) {
+          onClipUpdate(clipId, { label: editValue.trim() });
+        } else if (onClipRename) {
+          onClipRename(clipId, editValue.trim());
+        }
+      }
+    }
+    setEditingClipId(null);
+  };
+
   return (
-    <div className={`flex flex-col w-full bg-[#F5F5F5] border-t border-gray-200 select-none ${
-      isDraggingPlayhead || draggingClipId !== null || trimmingClipId !== null || isSelecting ? 'cursor-grabbing' : ''
-    }`}>
-      {/* Ruler */}
-      <div 
-        ref={containerRef}
-        className="relative h-48 overflow-x-auto overflow-y-hidden scrollbar-thin scrollbar-thumb-gray-300 scrollbar-track-transparent"
-        onMouseDown={handleTimelineMouseDown}
-      >
-        <div 
-          className="relative h-full" 
-          style={{ width: totalDuration * pixelsPerSecond + 100 }}
-        >
-          {/* Time Ticks */}
-          <div className="flex items-end h-8 border-b border-gray-300">
+    <div 
+      ref={timelineRootRef}
+      className={`flex flex-col w-full bg-[#F5F5F5] border-t border-gray-200 select-none h-64 overflow-hidden !overscroll-none touch-pan-y ${
+        isDraggingPlayhead || draggingClipId !== null || trimmingClipId !== null || isSelecting ? 'cursor-grabbing' : ''
+      }`}
+    >
+      {/* Header Row */}
+      <div className="flex h-8 shrink-0 border-b border-gray-300 z-[80]">
+        <div className="w-[200px] shrink-0 bg-gray-50 border-r border-gray-200 flex items-center px-3">
+          <span className="text-[10px] font-bold text-gray-400 uppercase tracking-wider">Tracks</span>
+        </div>
+        <div ref={headerScrollRef} className="flex-1 overflow-hidden !overscroll-none relative bg-[#F5F5F5]">
+          <div style={{ width: totalDuration * pixelsPerSecond + 100 }} className="h-full relative">
             {ticks.map((tick) => (
               <div 
                 key={tick} 
-                className="absolute flex flex-col items-center"
+                className="absolute flex flex-col items-center bottom-0"
                 style={{ left: tick * pixelsPerSecond }}
               >
                 <span className="text-[10px] text-gray-500 mb-1">{formatTime(tick)}</span>
@@ -393,22 +470,282 @@ export const Timeline: React.FC<TimelineProps> = ({
               </div>
             ))}
           </div>
+        </div>
+      </div>
 
-          {/* Tracks Area */}
-          <div className="relative mt-4 h-28">
-            {/* Grid Lines */}
-            <div className="absolute inset-0 pointer-events-none">
-              {ticks.map((tick) => (
-                <div 
-                  key={`grid-${tick}`}
-                  className="absolute top-0 bottom-0 w-px bg-gray-200/50"
-                  style={{ left: tick * pixelsPerSecond }}
-                />
-              ))}
+      {/* Scrollable Body */}
+      <div className="flex-1 overflow-y-auto overflow-x-hidden">
+        <div className="flex min-h-full">
+          {/* Sidebar Body */}
+          <div className="w-[200px] shrink-0 bg-white border-r border-gray-200 flex flex-col">
+            {tracks.map((track) => (
+              <div 
+                key={track.id}
+                className={`h-20 border-b border-gray-100 px-3 flex flex-col justify-center space-y-2 cursor-pointer transition-colors ${
+                  selectedTrackId === track.id ? 'bg-blue-50/50' : 'hover:bg-gray-50'
+                }`}
+                onClick={() => onTrackSelect(track.id)}
+              >
+                <div className="flex items-center justify-between">
+                  <span className={`text-xs font-medium truncate ${selectedTrackId === track.id ? 'text-blue-600' : 'text-gray-700'}`}>
+                    {track.name}
+                  </span>
+                  <div className="flex items-center space-x-1">
+                    <button 
+                      onClick={(e) => { e.stopPropagation(); onTrackUpdate(track.id, { isVisible: !track.isVisible }); }}
+                      className={`p-1 rounded hover:bg-gray-200 transition-colors ${track.isVisible ? 'text-gray-400' : 'text-blue-500'}`}
+                    >
+                      {track.isVisible ? <Eye size={12} /> : <EyeOff size={12} />}
+                    </button>
+                    <button 
+                      onClick={(e) => { e.stopPropagation(); onTrackUpdate(track.id, { isLocked: !track.isLocked }); }}
+                      className={`p-1 rounded hover:bg-gray-200 transition-colors ${track.isLocked ? 'text-amber-500' : 'text-gray-400'}`}
+                    >
+                      {track.isLocked ? <Lock size={12} /> : <Unlock size={12} />}
+                    </button>
+                    {track.type === TrackType.AUDIO && (
+                      <button 
+                        onClick={(e) => { e.stopPropagation(); onTrackUpdate(track.id, { isMuted: !track.isMuted }); }}
+                        className={`p-1 rounded hover:bg-gray-200 transition-colors ${track.isMuted ? 'text-red-500' : 'text-gray-400'}`}
+                      >
+                        {track.isMuted ? <VolumeX size={12} /> : <Volume2 size={12} />}
+                      </button>
+                    )}
+                  </div>
+                </div>
+                <div className="flex items-center space-x-2">
+                  <span className="text-[9px] px-1.5 py-0.5 rounded bg-gray-100 text-gray-500 uppercase font-bold">
+                    {track.type}
+                  </span>
+                  {(track.type === TrackType.TEXT || track.type === TrackType.SUBTITLE) && (
+                    <button 
+                      onClick={(e) => { e.stopPropagation(); onTrackSelect(track.id); onAddTextClip?.(track.type as TrackType.TEXT | TrackType.SUBTITLE); }}
+                      className="text-[9px] px-1.5 py-0.5 rounded bg-blue-100 text-blue-600 uppercase font-bold hover:bg-blue-200 transition-all"
+                    >
+                      + Entry
+                    </button>
+                  )}
+                  <div className="flex-1" />
+                  <button 
+                    onClick={(e) => { e.stopPropagation(); onTrackDuplicate(track.id); }}
+                    className="p-1 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded transition-all"
+                    title="Duplicate Track"
+                  >
+                    <Copy size={10} />
+                  </button>
+                  <button 
+                    onClick={(e) => { e.stopPropagation(); onTrackDelete(track.id); }}
+                    className="p-1 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded transition-all"
+                    title="Delete Track"
+                  >
+                    <Trash size={10} />
+                  </button>
+                </div>
+              </div>
+            ))}
+            <div className="p-3">
+              <div className="grid grid-cols-2 gap-2">
+                <button 
+                  onClick={() => onAddTrack(TrackType.VIDEO)}
+                  className="flex items-center justify-center space-x-1 py-1.5 px-2 rounded border border-dashed border-gray-300 text-gray-500 hover:border-blue-400 hover:text-blue-500 hover:bg-blue-50 transition-all text-[10px] font-medium"
+                >
+                  <Plus size={10} />
+                  <span>Video</span>
+                </button>
+                <button 
+                  onClick={() => onAddTrack(TrackType.AUDIO)}
+                  className="flex items-center justify-center space-x-1 py-1.5 px-2 rounded border border-dashed border-gray-300 text-gray-500 hover:border-blue-400 hover:text-blue-500 hover:bg-blue-50 transition-all text-[10px] font-medium"
+                >
+                  <Plus size={10} />
+                  <span>Audio</span>
+                </button>
+                <button 
+                  onClick={() => onAddTrack(TrackType.TEXT)}
+                  className="flex items-center justify-center space-x-1 py-1.5 px-2 rounded border border-dashed border-gray-300 text-gray-500 hover:border-blue-400 hover:text-blue-500 hover:bg-blue-50 transition-all text-[10px] font-medium"
+                >
+                  <Plus size={10} />
+                  <span>Text</span>
+                </button>
+                <button 
+                  onClick={() => onAddTrack(TrackType.IMAGE)}
+                  className="flex items-center justify-center space-x-1 py-1.5 px-2 rounded border border-dashed border-gray-300 text-gray-500 hover:border-blue-400 hover:text-blue-500 hover:bg-blue-50 transition-all text-[10px] font-medium"
+                >
+                  <Plus size={10} />
+                  <span>Image</span>
+                </button>
+              </div>
             </div>
+          </div>
+          {/* Tracks Area */}
+          <div 
+            ref={tracksScrollRef}
+            className="flex-1 relative overflow-x-auto overflow-y-hidden !overscroll-none touch-pan-y scrollbar-thin scrollbar-thumb-gray-300 scrollbar-track-transparent"
+            onMouseDown={handleTimelineMouseDown}
+            onScroll={handleTracksScroll}
+          >
+            <div 
+              className="relative min-h-full" 
+              style={{ width: totalDuration * pixelsPerSecond + 100 }}
+            >
+              {/* Tracks Area */}
+              <div className="relative">
+                {tracks.map((track) => (
+                  <div 
+                    key={track.id}
+                    className={`relative h-20 border-b border-gray-200/50 ${selectedTrackId === track.id ? 'bg-blue-50/20' : ''}`}
+                  >
+                    {/* Grid Lines */}
+                    <div className="absolute inset-0 pointer-events-none">
+                      {ticks.map((tick) => (
+                        <div 
+                          key={`grid-${track.id}-${tick}`}
+                          className="absolute top-0 bottom-0 w-px bg-gray-200/30"
+                          style={{ left: tick * pixelsPerSecond }}
+                        />
+                      ))}
+                    </div>
 
-            {/* Clips Container */}
-            <div className="absolute inset-0">
+                    {/* Clips for this track */}
+                    {clips.filter(c => c.trackId === track.id).map((clip) => {
+                    const isSelected = selectedClipIds.includes(clip.id);
+                    const start = clip.timelinePosition.start;
+                    const end = clip.timelinePosition.end;
+                    const duration = end - start;
+                    
+                    if (isNaN(start) || isNaN(end)) return null;
+
+                    return (
+                      <div
+                        key={clip.id}
+                        className={`absolute h-16 top-2 bg-black rounded-md border-2 overflow-hidden group shadow-lg cursor-grab active:cursor-grabbing transition-[border-color,transform,shadow,ring] ${
+                          draggingClipId === clip.id ? 'border-blue-500 z-40 scale-[1.02] shadow-blue-500/30 !transition-none' : 
+                          isSelected ? 'border-blue-500 z-30 shadow-blue-500/40 ring-2 ring-blue-500/20' : 'border-gray-800'
+                        }`}
+                        style={{
+                          left: start * pixelsPerSecond,
+                          width: duration * pixelsPerSecond,
+                        }}
+                        onMouseDown={(e) => {
+                          e.stopPropagation();
+                          e.preventDefault();
+                          
+                          const currentSelectedIds = handleClipSelection(e, clip.id);
+                          const rect = e.currentTarget.getBoundingClientRect();
+                          setDragOffset(e.clientX - rect.left);
+                          setDraggingClipId(clip.id);
+                          
+                          const positions: { [id: number]: { start: number; trackId: string } } = {};
+                          clips.forEach(c => {
+                            if (currentSelectedIds.includes(c.id)) {
+                              positions[c.id] = { start: c.timelinePosition.start, trackId: c.trackId };
+                            }
+                          });
+                          setInitialDragPositions(positions);
+                          onManipulationStart?.();
+                        }}
+                        onDoubleClick={(e) => {
+                          e.stopPropagation();
+                          startEditing(clip);
+                        }}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter' && selectedClipIds.includes(clip.id) && editingClipId === null) {
+                            e.stopPropagation();
+                            startEditing(clip);
+                          }
+                        }}
+                        tabIndex={0}
+                      >
+                        {clip.type === TrackType.VIDEO || clip.type === TrackType.IMAGE ? (
+                          <ThumbnailStrip 
+                            videoUrl={clip.videoUrl || clip.thumbnailUrl || ''}
+                            duration={clip.duration}
+                            sourceStart={clip.sourceStart}
+                            pixelsPerSecond={pixelsPerSecond}
+                            clipWidth={duration * pixelsPerSecond}
+                          />
+                        ) : (
+                          <div className={`w-full h-full flex items-center justify-center ${
+                            clip.type === TrackType.AUDIO ? 'bg-emerald-900/40' : 
+                            clip.type === TrackType.TEXT ? 'bg-purple-900/40' : 'bg-amber-900/40'
+                          }`}>
+                            <span className="text-[10px] text-white/50 font-bold uppercase tracking-widest">{clip.type}</span>
+                          </div>
+                        )}
+                        
+                        <div className={`absolute top-1 left-1 bg-black/60 text-white text-[10px] px-1.5 py-0.5 rounded font-medium flex items-center space-x-1.5 group/label transition-colors ${
+                          isSelected ? 'bg-blue-600' : ''
+                        }`}>
+                          {isSelected && <CheckCircle2 size={10} className="text-white" />}
+                          {editingClipId === clip.id ? (
+                            <input
+                              autoFocus
+                              className="bg-transparent border-none outline-none w-24 text-white"
+                              value={editValue}
+                              onChange={(e) => setEditValue(e.target.value)}
+                              onBlur={() => saveEdit(clip.id)}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter') {
+                                  saveEdit(clip.id);
+                                }
+                                if (e.key === 'Escape') {
+                                  setEditingClipId(null);
+                                }
+                              }}
+                            />
+                          ) : (
+                            <span 
+                              className="cursor-text hover:text-blue-400 transition-colors"
+                              onClick={(e) => { e.stopPropagation(); startEditing(clip); }}
+                            >
+                              {clip.label}
+                            </span>
+                          )}
+                        </div>
+
+                        <button
+                          className={`absolute top-1 right-1 p-1 bg-black/60 rounded opacity-0 group-hover:opacity-100 transition-all z-50 ${
+                            downloadedClipIds.includes(clip.id) ? 'text-emerald-400' : 'text-white/60 hover:text-white hover:bg-blue-600'
+                          }`}
+                          onClick={() => onClipDownload?.(clip)}
+                        >
+                          <Download size={12} />
+                        </button>
+
+                        <div className="absolute bottom-1 right-1 text-white/60 text-[10px] font-mono">
+                          {duration.toFixed(1)}s
+                        </div>
+
+                        <div className={`absolute inset-0 border-2 pointer-events-none transition-all duration-200 ${
+                          isSelected ? 'border-blue-500 bg-blue-500/10' : 'border-transparent group-hover:border-blue-500/30'
+                        }`} />
+                        
+                        <div 
+                          className="absolute left-0 top-0 bottom-0 w-2 bg-blue-500/0 group-hover:bg-blue-500/40 cursor-col-resize z-50 transition-colors"
+                          onMouseDown={(e) => {
+                            e.stopPropagation();
+                            handleClipSelection(e, clip.id);
+                            setTrimmingClipId({ id: clip.id, side: 'left' });
+                            onManipulationStart?.();
+                          }}
+                        />
+                        <div 
+                          className="absolute right-0 top-0 bottom-0 w-2 bg-blue-500/0 group-hover:bg-blue-500/40 cursor-col-resize z-50 transition-colors"
+                          onMouseDown={(e) => {
+                            e.stopPropagation();
+                            handleClipSelection(e, clip.id);
+                            setTrimmingClipId({ id: clip.id, side: 'right' });
+                            onManipulationStart?.();
+                          }}
+                        />
+                      </div>
+                    );
+                  })}
+                </div>
+              ))}
+
+              {/* Spacer to match sidebar buttons */}
+              <div className="h-24" />
+
               {/* Marquee Selection Rect */}
               {selectionRect && (
                 <div 
@@ -424,198 +761,41 @@ export const Timeline: React.FC<TimelineProps> = ({
               {/* Snapping Indicator Line */}
               {snappedPoint !== null && !isNaN(snappedPoint) && (
                 <div 
-                  className="absolute top-0 bottom-0 w-0.5 bg-blue-400/50 z-50 pointer-events-none"
+                  className="absolute top-0 bottom-0 w-0.5 bg-blue-400/50 z-[80] pointer-events-none"
                   style={{ left: snappedPoint * pixelsPerSecond }}
                 />
               )}
-              {clips.map((clip) => {
-                const isSelected = selectedClipIds.includes(clip.id);
-                const start = clip.timelinePosition.start;
-                const end = clip.timelinePosition.end;
-                const duration = end - start;
-                
-                if (isNaN(start) || isNaN(end)) return null;
-
-                return (
-                  <div
-                    key={clip.id}
-                    className={`absolute h-20 top-4 bg-black rounded-md border-2 overflow-hidden group shadow-lg cursor-grab active:cursor-grabbing transition-[border-color,transform,shadow,ring] ${
-                      draggingClipId === clip.id ? 'border-blue-500 z-40 scale-[1.02] shadow-blue-500/30 !transition-none' : 
-                      isSelected ? 'border-blue-500 z-30 shadow-blue-500/40 ring-2 ring-blue-500/20' : 'border-gray-800'
-                    }`}
-                    style={{
-                      left: start * pixelsPerSecond,
-                      width: duration * pixelsPerSecond,
-                    }}
-                    onMouseDown={(e) => {
-                      e.stopPropagation();
-                      e.preventDefault(); // Prevent browser ghost image of thumbnails
-                      
-                      // Handle Selection
-                      const currentSelectedIds = handleClipSelection(e, clip.id);
-
-                      const rect = e.currentTarget.getBoundingClientRect();
-                      setDragOffset(e.clientX - rect.left);
-                      setDraggingClipId(clip.id);
-                      
-                      // Store initial positions for all selected clips
-                      const positions: { [id: number]: number } = {};
-                      clips.forEach(c => {
-                        if (currentSelectedIds.includes(c.id)) {
-                          positions[c.id] = c.timelinePosition.start;
-                        }
-                      });
-                      setInitialDragPositions(positions);
-                      
-                      onManipulationStart?.();
-                    }}
-                  >
-                  <ThumbnailStrip 
-                    videoUrl={clip.videoUrl}
-                    duration={clip.duration}
-                    sourceStart={clip.sourceStart}
-                    pixelsPerSecond={pixelsPerSecond}
-                    clipWidth={(clip.timelinePosition.end - clip.timelinePosition.start) * pixelsPerSecond}
-                  />
-                  
-                  {/* Clip Label/ID */}
-                  <div 
-                    className={`absolute top-1 left-1 bg-black/60 text-white text-[10px] px-1.5 py-0.5 rounded font-medium flex items-center space-x-1.5 group/label transition-colors ${
-                      isSelected ? 'bg-blue-600' : ''
-                    }`}
-                    onMouseDown={(e) => {
-                      if (editingClipId === clip.id) {
-                        e.stopPropagation();
-                      }
-                    }}
-                  >
-                    {isSelected && <CheckCircle2 size={10} className="text-white" />}
-                    {editingClipId === clip.id ? (
-                      <input
-                        autoFocus
-                        className="bg-transparent border-none outline-none w-24 text-white"
-                        value={editValue}
-                        onChange={(e) => setEditValue(e.target.value)}
-                        onBlur={() => {
-                          if (editValue.trim() && onClipRename) {
-                            onClipRename(clip.id, editValue.trim());
-                          }
-                          setEditingClipId(null);
-                        }}
-                        onKeyDown={(e) => {
-                          if (e.key === 'Enter') {
-                            if (editValue.trim() && onClipRename) {
-                              onClipRename(clip.id, editValue.trim());
-                            }
-                            setEditingClipId(null);
-                          }
-                        }}
-                      />
-                    ) : (
-                      <span 
-                        className="cursor-text hover:text-blue-400 transition-colors"
-                        onClick={() => {
-                          setEditingClipId(clip.id);
-                          setEditValue(clip.label);
-                        }}
-                      >
-                        {clip.label}
-                      </span>
-                    )}
-                  </div>
-
-                  {/* Individual Download Button */}
-                  <button
-                    className={`absolute top-1 right-1 p-1 bg-black/60 rounded opacity-0 group-hover:opacity-100 transition-all z-50 ${
-                      downloadedClipIds.includes(clip.id) 
-                        ? 'text-emerald-400 hover:text-emerald-300 hover:bg-emerald-900/40' 
-                        : 'text-white/60 hover:text-white hover:bg-blue-600'
-                    }`}
-                    onClick={() => onClipDownload?.(clip)}
-                    title={downloadedClipIds.includes(clip.id) ? "Downloaded" : "Download Clip"}
-                  >
-                    <Download size={12} />
-                  </button>
-
-                  {/* Clip Duration Label */}
-                  <div className="absolute bottom-1 right-1 text-white/60 text-[10px] font-mono">
-                    {(clip.timelinePosition.end - clip.timelinePosition.start).toFixed(1)}s
-                  </div>
-
-                  {/* Selection Overlay */}
-                  <div className={`absolute inset-0 border-2 pointer-events-none transition-all duration-200 ${
-                    isSelected 
-                      ? 'border-blue-500 bg-blue-500/10' 
-                      : 'border-transparent group-hover:border-blue-500/30'
-                  }`} />
-                  
-                  {/* Subtle Top Accent for Selection */}
-                  {isSelected && (
-                    <div className="absolute top-0 left-0 right-0 h-0.5 bg-blue-400 z-50" />
-                  )}
-
-                  {/* Trim Handles */}
-                  <div 
-                    className="absolute left-0 top-0 bottom-0 w-2 bg-blue-500/0 group-hover:bg-blue-500/40 cursor-col-resize z-50 transition-colors"
-                    onMouseDown={(e) => {
-                      e.stopPropagation();
-                      handleClipSelection(e, clip.id);
-                      setTrimmingClipId({ id: clip.id, side: 'left' });
-                      onManipulationStart?.();
-                    }}
-                  />
-                  <div 
-                    className="absolute right-0 top-0 bottom-0 w-2 bg-blue-500/0 group-hover:bg-blue-500/40 cursor-col-resize z-50 transition-colors"
-                    onMouseDown={(e) => {
-                      e.stopPropagation();
-                      handleClipSelection(e, clip.id);
-                      setTrimmingClipId({ id: clip.id, side: 'right' });
-                      onManipulationStart?.();
-                    }}
-                  />
-                </div>
-              )})}
             </div>
-          </div>
 
-          {/* Playhead */}
-          {!isNaN(currentTime) && (
-            <div 
-              className="absolute top-0 bottom-0 z-50 pointer-events-none"
-              style={{ left: currentTime * pixelsPerSecond }}
-            >
-              {/* Playhead Handle */}
+            {/* Playhead */}
+            {!isNaN(currentTime) && (
               <div 
-                className="absolute top-0 -translate-x-1/2 w-3 h-4 bg-blue-600 rounded-b-sm cursor-col-resize pointer-events-auto"
-                onMouseDown={(e) => {
-                  e.stopPropagation();
-                  setIsDraggingPlayhead(true);
-                }}
-                onTouchStart={(e) => {
-                  e.stopPropagation();
-                  setIsDraggingPlayhead(true);
-                }}
-              />
-              {/* Playhead Line */}
-              <div className="w-px h-full bg-blue-600" />
-            </div>
-          )}
+                className="absolute top-0 bottom-0 z-[100] pointer-events-none"
+                style={{ left: currentTime * pixelsPerSecond }}
+              >
+                <div 
+                  className="absolute top-0 -translate-x-1/2 w-3 h-4 bg-blue-600 rounded-b-sm cursor-col-resize pointer-events-auto"
+                  onMouseDown={(e) => { e.stopPropagation(); setIsDraggingPlayhead(true); }}
+                />
+                <div className="w-px h-full bg-blue-600" />
+              </div>
+            )}
+          </div>
         </div>
       </div>
+    </div>
 
-      {/* Timeline Controls Footer */}
+    {/* Timeline Controls Footer */}
       <div className="h-10 border-t border-gray-200 bg-white flex items-center px-4 justify-between">
         <div className="flex items-center space-x-6">
           <span className="text-xs font-mono text-gray-600 w-24">
             {formatTime(currentTime)} / {formatTime(totalDuration)}
           </span>
           
-          {/* Zoom Controls */}
           <div className="flex items-center space-x-2 border-l border-gray-200 pl-6">
             <button 
               onClick={() => handleZoom(pixelsPerSecond * 0.8)}
               className="p-1 hover:bg-gray-100 rounded text-gray-500 transition-colors"
-              title="Zoom Out"
             >
               <ZoomOut size={16} />
             </button>
@@ -630,17 +810,50 @@ export const Timeline: React.FC<TimelineProps> = ({
             <button 
               onClick={() => handleZoom(pixelsPerSecond * 1.2)}
               className="p-1 hover:bg-gray-100 rounded text-gray-500 transition-colors"
-              title="Zoom In"
             >
               <ZoomIn size={16} />
             </button>
-            <span className="text-[10px] text-gray-400 font-mono ml-2">
-              {Math.round((pixelsPerSecond / 40) * 100)}%
-            </span>
           </div>
         </div>
         
         <div className="flex items-center space-x-2">
+          <div className="flex items-center bg-gray-100 rounded-md p-0.5 mr-4">
+            <button 
+              onClick={() => onAddTrack(TrackType.VIDEO)} 
+              className="px-2 py-1 text-[10px] font-bold uppercase hover:bg-white rounded transition-all"
+              title="Add Video Track"
+            >
+              + Video
+            </button>
+            <button 
+              onClick={() => onAddTrack(TrackType.AUDIO)} 
+              className="px-2 py-1 text-[10px] font-bold uppercase hover:bg-white rounded transition-all"
+              title="Add Audio Track"
+            >
+              + Audio
+            </button>
+            <button 
+              onClick={() => onAddTrack(TrackType.TEXT)} 
+              className="px-2 py-1 text-[10px] font-bold uppercase hover:bg-white rounded transition-all"
+              title="Add Text Track"
+            >
+              + Text
+            </button>
+            <button 
+              onClick={() => onAddTrack(TrackType.SUBTITLE)} 
+              className="px-2 py-1 text-[10px] font-bold uppercase hover:bg-white rounded transition-all"
+              title="Add Subtitle Track"
+            >
+              + Sub
+            </button>
+            <button 
+              onClick={() => onAddTrack(TrackType.IMAGE)} 
+              className="px-2 py-1 text-[10px] font-bold uppercase hover:bg-white rounded transition-all"
+              title="Add Image Track"
+            >
+              + Img
+            </button>
+          </div>
           <button 
             onClick={onSplit}
             className="p-1.5 hover:bg-gray-100 rounded text-gray-500 transition-colors" 

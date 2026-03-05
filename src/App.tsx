@@ -3,18 +3,25 @@ import JSZip from 'jszip';
 import { Timeline } from './components/Timeline';
 import { VideoPreview } from './components/VideoPreview';
 import { Recorder } from './components/Recorder';
-import { VideoObjType, VideoClip, RecordingMode } from './types';
+import { VideoObjType, VideoClip, RecordingMode, Track, TrackType } from './types';
 import { videoDB } from './services/db';
 import { 
   Play, Pause, SkipBack, SkipForward, Video, Download, Undo2, Redo2, Radio, 
   ChevronDown, Archive, FileVideo, History, Trash2, AlertCircle, X, Upload,
-  MousePointer2, ArrowRightToLine
+  MousePointer2, ArrowRightToLine, Plus, Layers, Music, Type as TypeIcon, Subtitles, Image as ImageIcon
 } from 'lucide-react';
+
+const INITIAL_TRACKS: Track[] = [
+  { id: 'track-1', name: 'Video 1', type: TrackType.VIDEO, isVisible: true, isLocked: false, isMuted: false },
+  { id: 'track-2', name: 'Audio 1', type: TrackType.AUDIO, isVisible: true, isLocked: false, isMuted: false },
+];
 
 const MOCK_CLIPS: VideoObjType = [
   {
     id: 1,
+    trackId: 'track-1',
     label: "Big Buck Bunny",
+    type: TrackType.VIDEO,
     videoUrl: "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4",
     thumbnailUrl: "https://picsum.photos/seed/bunny/200/120",
     duration: 10,
@@ -26,7 +33,9 @@ const MOCK_CLIPS: VideoObjType = [
   },
   {
     id: 2,
+    trackId: 'track-1',
     label: "Elephant's Dream",
+    type: TrackType.VIDEO,
     videoUrl: "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ElephantsDream.mp4",
     thumbnailUrl: "https://picsum.photos/seed/elephant/200/120",
     duration: 15,
@@ -35,23 +44,13 @@ const MOCK_CLIPS: VideoObjType = [
       start: 15,
       end: 30,
     }
-  },
-  {
-    id: 3,
-    label: "For Bigger Blazes",
-    videoUrl: "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4",
-    thumbnailUrl: "https://picsum.photos/seed/blaze/200/120",
-    duration: 8,
-    sourceStart: 0,
-    timelinePosition: {
-      start: 35,
-      end: 43,
-    }
   }
 ];
 
 export default function App() {
   const [clips, setClips] = useState<VideoObjType>([]);
+  const [tracks, setTracks] = useState<Track[]>(INITIAL_TRACKS);
+  const [selectedTrackId, setSelectedTrackId] = useState<string>(INITIAL_TRACKS[0].id);
   const [isInitialized, setIsInitialized] = useState(false);
   const [recordingStartTime, setRecordingStartTime] = useState(0);
   const [recordingMode, setRecordingMode] = useState<RecordingMode>('insert');
@@ -174,8 +173,20 @@ export default function App() {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    if (!file.type.startsWith('video/')) {
-      alert('Please select a valid video file.');
+    const targetTrack = tracks.find(t => t.id === selectedTrackId);
+    if (!targetTrack) return;
+
+    // Validate file type based on track type
+    if (targetTrack.type === TrackType.VIDEO && !file.type.startsWith('video/')) {
+      alert('Please select a valid video file for a video track.');
+      return;
+    }
+    if (targetTrack.type === TrackType.AUDIO && !file.type.startsWith('audio/')) {
+      alert('Please select a valid audio file for an audio track.');
+      return;
+    }
+    if (targetTrack.type === TrackType.IMAGE && !file.type.startsWith('image/')) {
+      alert('Please select a valid image file for an image track.');
       return;
     }
 
@@ -185,32 +196,38 @@ export default function App() {
     try {
       const videoUrl = URL.createObjectURL(file);
       
-      // Get duration
-      const duration = await new Promise<number>((resolve, reject) => {
-        const video = document.createElement('video');
-        video.preload = 'metadata';
-        video.src = videoUrl;
-        video.onloadedmetadata = () => {
-          resolve(video.duration);
-        };
-        video.onerror = () => {
-          reject(new Error('Failed to load video metadata.'));
-        };
-      });
+      let duration = 5; // Default for images
+      
+      if (targetTrack.type === TrackType.VIDEO || targetTrack.type === TrackType.AUDIO) {
+        // Get duration
+        duration = await new Promise<number>((resolve, reject) => {
+          const media = document.createElement(targetTrack.type === TrackType.VIDEO ? 'video' : 'audio');
+          media.preload = 'metadata';
+          media.src = videoUrl;
+          media.onloadedmetadata = () => {
+            resolve(media.duration);
+          };
+          media.onerror = () => {
+            reject(new Error('Failed to load media metadata.'));
+          };
+        });
+      }
 
       const newId = Date.now();
       const blobId = `blob_${newId}`;
       
       const newClip: VideoClip = {
         id: newId,
+        trackId: selectedTrackId,
         label: file.name.split('.')[0],
-        videoUrl,
-        thumbnailUrl: `https://picsum.photos/seed/${newId}/200/120`,
+        type: targetTrack.type,
+        videoUrl: targetTrack.type !== TrackType.IMAGE ? videoUrl : undefined,
+        thumbnailUrl: targetTrack.type === TrackType.IMAGE ? videoUrl : `https://picsum.photos/seed/${newId}/200/120`,
         duration,
         sourceStart: 0,
         timelinePosition: {
           start: currentTime,
-          end: currentTime + Math.min(duration, 5), // Default to 5s or full duration if shorter
+          end: currentTime + Math.min(duration, 5),
         },
         blobId,
       };
@@ -355,10 +372,15 @@ export default function App() {
   };
 
   const handleRecordingComplete = async (videoUrl: string, duration: number, blob: Blob) => {
+    const targetTrack = tracks.find(t => t.id === selectedTrackId);
+    if (!targetTrack) return;
+
     const newId = Date.now();
     const blobId = `blob_${newId}`;
     const newClip: VideoClip = {
       id: newId,
+      trackId: selectedTrackId,
+      type: targetTrack.type,
       label: `Recording ${new Date().toLocaleTimeString()}`,
       videoUrl,
       thumbnailUrl: `https://picsum.photos/seed/${newId}/200/120`,
@@ -412,16 +434,17 @@ export default function App() {
     setSelectedClipIds([newId]);
   };
 
-  const handleClipsUpdate = (updates: { id: number; newStart: number }[]) => {
+  const handleClipsUpdate = (updates: { id: number; newStart: number; newTrackId?: string }[]) => {
     setClips((prev) => {
       const nextClips = [...prev];
-      updates.forEach(({ id, newStart }) => {
+      updates.forEach(({ id, newStart, newTrackId }) => {
         const index = nextClips.findIndex(c => c.id === id);
         if (index !== -1) {
           const clip = nextClips[index];
           const duration = clip.timelinePosition.end - clip.timelinePosition.start;
           nextClips[index] = {
             ...clip,
+            trackId: newTrackId || clip.trackId,
             timelinePosition: {
               start: newStart,
               end: newStart + duration,
@@ -431,6 +454,86 @@ export default function App() {
       });
       return nextClips;
     });
+  };
+
+  const handleAddTrack = (type: TrackType) => {
+    const newTrack: Track = {
+      id: `track-${Date.now()}`,
+      name: `${type.charAt(0).toUpperCase() + type.slice(1)} ${tracks.filter(t => t.type === type).length + 1}`,
+      type,
+      isVisible: true,
+      isLocked: false,
+      isMuted: false,
+    };
+    setTracks([...tracks, newTrack]);
+    setSelectedTrackId(newTrack.id);
+  };
+
+  const handleDeleteTrack = (trackId: string) => {
+    if (tracks.length <= 1) return;
+    setTracks(tracks.filter(t => t.id !== trackId));
+    setClips(clips.filter(c => c.trackId !== trackId));
+    if (selectedTrackId === trackId) {
+      setSelectedTrackId(tracks.find(t => t.id !== trackId)?.id || '');
+    }
+  };
+
+  const handleDuplicateTrack = (trackId: string) => {
+    const trackToDup = tracks.find(t => t.id === trackId);
+    if (!trackToDup) return;
+
+    const newTrackId = `track-${Date.now()}`;
+    const newTrack: Track = {
+      ...trackToDup,
+      id: newTrackId,
+      name: `${trackToDup.name} (Copy)`,
+    };
+
+    const newClips = clips
+      .filter(c => c.trackId === trackId)
+      .map(c => ({
+        ...c,
+        id: Date.now() + Math.random(),
+        trackId: newTrackId,
+      }));
+
+    setTracks([...tracks, newTrack]);
+    pushToHistory([...clips, ...newClips]);
+    setSelectedTrackId(newTrackId);
+  };
+
+  const handleUpdateTrack = (trackId: string, updates: Partial<Track>) => {
+    setTracks(tracks.map(t => t.id === trackId ? { ...t, ...updates } : t));
+  };
+
+  const handleAddTextClip = (type: TrackType.TEXT | TrackType.SUBTITLE) => {
+    const targetTrack = tracks.find(t => t.id === selectedTrackId && t.type === type);
+    if (!targetTrack) {
+      alert(`Please select a ${type} track first.`);
+      return;
+    }
+
+    const newId = Date.now();
+    const newClip: VideoClip = {
+      id: newId,
+      trackId: selectedTrackId,
+      label: type === TrackType.TEXT ? 'New Text' : 'New Subtitle',
+      type,
+      content: type === TrackType.TEXT ? 'Enter text here' : 'Enter subtitle here',
+      duration: 5,
+      sourceStart: 0,
+      timelinePosition: {
+        start: currentTime,
+        end: currentTime + 5,
+      },
+      style: {
+        fontSize: 24,
+        color: '#ffffff',
+        backgroundColor: 'transparent',
+      }
+    };
+
+    pushToHistory([...clips, newClip]);
   };
 
   const handleClipTrim = (clipId: number, side: 'left' | 'right', newTime: number) => {
@@ -591,6 +694,16 @@ export default function App() {
 
   const handleClipRename = (clipId: number, newLabel: string) => {
     const newState = clips.map(c => c.id === clipId ? { ...c, label: newLabel } : c);
+    pushToHistory(newState);
+  };
+
+  const handleClipContentUpdate = (clipId: number, newContent: string) => {
+    const newState = clips.map(c => c.id === clipId ? { ...c, content: newContent } : c);
+    pushToHistory(newState);
+  };
+
+  const handleClipUpdate = (clipId: number, updates: Partial<VideoClip>) => {
+    const newState = clips.map(c => c.id === clipId ? { ...c, ...updates } : c);
     pushToHistory(newState);
   };
 
@@ -854,7 +967,7 @@ export default function App() {
   ]);
 
   return (
-    <div className="min-h-screen bg-[#1A1A1A] text-white flex flex-col font-sans">
+    <div className="min-h-screen bg-[#1A1A1A] text-white flex flex-col font-sans overscroll-none">
       {/* Restore Session Prompt */}
       {showRestorePrompt && (
         <div className="fixed inset-0 z-[200] bg-black/80 flex items-center justify-center p-4 backdrop-blur-md">
@@ -1073,6 +1186,7 @@ export default function App() {
             <div className="w-full aspect-video relative group rounded-2xl overflow-hidden border border-white/10 shadow-2xl">
               <VideoPreview 
                 clips={clips} 
+                tracks={tracks}
                 currentTime={currentTime} 
                 isPlaying={isPlaying} 
               />
@@ -1115,6 +1229,14 @@ export default function App() {
       <section className="bg-white text-black">
         <Timeline 
           clips={clips} 
+          tracks={tracks}
+          selectedTrackId={selectedTrackId}
+          onTrackSelect={setSelectedTrackId}
+          onTrackUpdate={handleUpdateTrack}
+          onTrackDelete={handleDeleteTrack}
+          onTrackDuplicate={handleDuplicateTrack}
+          onAddTrack={handleAddTrack}
+          onAddTextClip={handleAddTextClip}
           currentTime={currentTime} 
           onTimeChange={(time) => {
             setCurrentTime(time);
@@ -1123,6 +1245,8 @@ export default function App() {
           onClipsUpdate={handleClipsUpdate}
           onClipTrim={handleClipTrim}
           onClipRename={handleClipRename}
+          onClipContentUpdate={handleClipContentUpdate}
+          onClipUpdate={handleClipUpdate}
           onClipDownload={handleClipDownload}
           onManipulationStart={handleManipulationStart}
           onManipulationEnd={handleManipulationEnd}
@@ -1141,7 +1265,7 @@ export default function App() {
         type="file" 
         ref={fileInputRef} 
         onChange={handleFileChange} 
-        accept="video/*" 
+        accept="video/*,audio/*,image/*" 
         className="hidden" 
       />
     </div>
