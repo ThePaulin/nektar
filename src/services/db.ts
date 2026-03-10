@@ -1,9 +1,10 @@
 import { VideoClip, VideoObjType } from "../types";
 
 const DB_NAME = "VideoEditorDB";
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const CLIPS_STORE = "clips";
 const BLOBS_STORE = "blobs";
+const TRACKS_STORE = "tracks";
 
 export class VideoDB {
   private db: IDBDatabase | null = null;
@@ -19,6 +20,9 @@ export class VideoDB {
         }
         if (!db.objectStoreNames.contains(BLOBS_STORE)) {
           db.createObjectStore(BLOBS_STORE);
+        }
+        if (!db.objectStoreNames.contains(TRACKS_STORE)) {
+          db.createObjectStore(TRACKS_STORE, { keyPath: "id" });
         }
       };
 
@@ -82,7 +86,6 @@ export class VideoDB {
       const transaction = db.transaction(CLIPS_STORE, "readwrite");
       const store = transaction.objectStore(CLIPS_STORE);
       
-      // Clear existing metadata first to keep it in sync
       store.clear();
       for (const clip of clips) {
         store.put(clip);
@@ -96,6 +99,47 @@ export class VideoDB {
       if (err.name === "InvalidStateError" || err.message?.includes("closing")) {
         this.db = null;
         return this.saveAllClips(clips);
+      }
+      throw err;
+    }
+  }
+
+  async saveTracks(tracks: any[]): Promise<void> {
+    const db = await this.ensureDB();
+    try {
+      const transaction = db.transaction(TRACKS_STORE, "readwrite");
+      const store = transaction.objectStore(TRACKS_STORE);
+      store.clear();
+      for (const track of tracks) {
+        store.put(track);
+      }
+      return new Promise((resolve, reject) => {
+        transaction.oncomplete = () => resolve();
+        transaction.onerror = () => reject(transaction.error);
+      });
+    } catch (err: any) {
+      if (err.name === "InvalidStateError" || err.message?.includes("closing")) {
+        this.db = null;
+        return this.saveTracks(tracks);
+      }
+      throw err;
+    }
+  }
+
+  async getTracks(): Promise<any[]> {
+    const db = await this.ensureDB();
+    try {
+      return new Promise((resolve, reject) => {
+        const transaction = db.transaction(TRACKS_STORE, "readonly");
+        const store = transaction.objectStore(TRACKS_STORE);
+        const request = store.getAll();
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+      });
+    } catch (err: any) {
+      if (err.name === "InvalidStateError" || err.message?.includes("closing")) {
+        this.db = null;
+        return this.getTracks();
       }
       throw err;
     }
@@ -167,9 +211,10 @@ export class VideoDB {
   async clearAll(): Promise<void> {
     const db = await this.ensureDB();
     try {
-      const transaction = db.transaction([CLIPS_STORE, BLOBS_STORE], "readwrite");
+      const transaction = db.transaction([CLIPS_STORE, BLOBS_STORE, TRACKS_STORE], "readwrite");
       transaction.objectStore(CLIPS_STORE).clear();
       transaction.objectStore(BLOBS_STORE).clear();
+      transaction.objectStore(TRACKS_STORE).clear();
 
       return new Promise((resolve, reject) => {
         transaction.oncomplete = () => resolve();

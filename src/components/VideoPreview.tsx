@@ -58,6 +58,9 @@ export const VideoPreview: React.FC<VideoPreviewProps> = ({ clips, tracks, curre
       {clips.map((clip) => {
         const trackIndex = tracks.findIndex(t => t.id === clip.trackId);
         const isActive = activeClips.some(c => c.id === clip.id);
+        // Higher track index in the array means lower in the timeline UI.
+        // We want the top-most track (index 0) to have the highest z-index.
+        const zIndex = tracks.length - trackIndex;
 
         if (clip.type === TrackType.VIDEO || clip.type === TrackType.AUDIO) {
           return (
@@ -68,7 +71,7 @@ export const VideoPreview: React.FC<VideoPreviewProps> = ({ clips, tracks, curre
               className={`absolute inset-0 w-full h-full object-contain transition-opacity duration-200 ${
                 isActive && clip.type === TrackType.VIDEO ? 'opacity-100' : 'opacity-0 pointer-events-none'
               }`}
-              style={{ zIndex: trackIndex }}
+              style={{ zIndex }}
               playsInline
             />
           );
@@ -81,7 +84,7 @@ export const VideoPreview: React.FC<VideoPreviewProps> = ({ clips, tracks, curre
               className={`absolute inset-0 w-full h-full object-contain transition-opacity duration-200 ${
                 isActive ? 'opacity-100' : 'opacity-0 pointer-events-none'
               }`}
-              style={{ zIndex: trackIndex }}
+              style={{ zIndex }}
               referrerPolicy="no-referrer"
             />
           );
@@ -93,12 +96,24 @@ export const VideoPreview: React.FC<VideoPreviewProps> = ({ clips, tracks, curre
             <div 
               key={clip.id}
               className="absolute inset-0 flex items-center justify-center pointer-events-none"
-              style={{ zIndex: trackIndex + 100 }}
+              style={{ 
+                zIndex,
+                transform: `
+                  translate(${clip.style?.position?.x || 0}px, ${clip.style?.position?.y || 0}px)
+                  scale(${clip.style?.scale || 1})
+                  rotate(${clip.style?.rotation || 0}deg)
+                `
+              }}
             >
               <div 
                 className={`px-4 py-2 rounded text-center ${clip.type === TrackType.SUBTITLE ? 'bg-black/60 mb-10' : ''}`}
                 style={{
                   fontSize: `${clip.style?.fontSize || 24}px`,
+                  fontWeight: clip.style?.fontWeight || 'normal',
+                  fontStyle: clip.style?.fontStyle || 'normal',
+                  fontStretch: clip.style?.fontStretch || 'normal',
+                  lineHeight: clip.style?.lineHeight || 'normal',
+                  fontFamily: clip.style?.fontFamily || 'sans-serif',
                   color: clip.style?.color || '#ffffff',
                   backgroundColor: clip.style?.backgroundColor || 'transparent',
                 }}
@@ -113,7 +128,7 @@ export const VideoPreview: React.FC<VideoPreviewProps> = ({ clips, tracks, curre
 
       {/* Empty State */}
       {activeClips.length === 0 && (
-        <div className="absolute inset-0 flex items-center justify-center bg-black z-[200]">
+        <div className="absolute inset-0 flex items-center justify-center bg-black z-[100]">
           <p className="text-gray-600 text-sm font-medium">No active clips</p>
         </div>
       )}

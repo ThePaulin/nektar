@@ -3,6 +3,8 @@ import JSZip from 'jszip';
 import { Timeline } from './components/Timeline';
 import { VideoPreview } from './components/VideoPreview';
 import { Recorder } from './components/Recorder';
+import { AudioRecorder } from './components/AudioRecorder';
+import { TextEditor } from './components/TextEditor';
 import { VideoObjType, VideoClip, RecordingMode, Track, TrackType } from './types';
 import { videoDB } from './services/db';
 import { 
@@ -55,8 +57,11 @@ export default function App() {
   const [recordingStartTime, setRecordingStartTime] = useState(0);
   const [recordingMode, setRecordingMode] = useState<RecordingMode>('insert');
   const [isExportMenuOpen, setIsExportMenuOpen] = useState(false);
+  const [timelineHeight, setTimelineHeight] = useState(350);
+  const [isResizing, setIsResizing] = useState(false);
   const [showRestorePrompt, setShowRestorePrompt] = useState(false);
   const [pendingRestoredClips, setPendingRestoredClips] = useState<VideoObjType | null>(null);
+  const [pendingRestoredTracks, setPendingRestoredTracks] = useState<Track[] | null>(null);
   const [past, setPast] = useState<VideoObjType[]>([]);
   const [future, setFuture] = useState<VideoObjType[]>([]);
   const [tempState, setTempState] = useState<VideoObjType | null>(null);
@@ -76,8 +81,10 @@ export default function App() {
     const checkDB = async () => {
       try {
         const storedClips = await videoDB.getClips();
+        const storedTracks = await videoDB.getTracks();
         if (storedClips && storedClips.length > 0) {
           setPendingRestoredClips(storedClips);
+          setPendingRestoredTracks(storedTracks && storedTracks.length > 0 ? storedTracks : INITIAL_TRACKS);
           setShowRestorePrompt(true);
         } else {
           setClips(MOCK_CLIPS);
@@ -95,9 +102,12 @@ export default function App() {
   // Sync metadata to DB on changes
   useEffect(() => {
     const syncMetadata = async () => {
-      if (isInitialized && clips.length > 0) {
+      if (isInitialized) {
         try {
-          await videoDB.saveAllClips(clips);
+          await Promise.all([
+            videoDB.saveAllClips(clips),
+            videoDB.saveTracks(tracks)
+          ]);
         } catch (err: any) {
           console.error("Failed to sync metadata to IndexedDB:", err);
           if (err.name === "QuotaExceededError") {
@@ -107,7 +117,7 @@ export default function App() {
       }
     };
     syncMetadata();
-  }, [clips, isInitialized]);
+  }, [clips, tracks, isInitialized]);
 
   const handleRestore = async () => {
     if (!pendingRestoredClips) return;
@@ -119,12 +129,21 @@ export default function App() {
         if (clip.blobId) {
           const blob = await videoDB.getBlob(clip.blobId);
           if (blob) {
-            return { ...clip, videoUrl: URL.createObjectURL(blob) };
+            const url = URL.createObjectURL(blob);
+            const isImage = clip.type === TrackType.IMAGE;
+            return { 
+              ...clip, 
+              videoUrl: isImage ? undefined : url,
+              thumbnailUrl: isImage ? url : clip.thumbnailUrl 
+            };
           }
         }
         return clip;
       }));
       
+      if (pendingRestoredTracks) {
+        setTracks(pendingRestoredTracks);
+      }
       setClips(restoredClips);
       setPast([]);
       setFuture([]);
@@ -371,6 +390,31 @@ export default function App() {
     }).filter(c => c.timelinePosition.end > c.timelinePosition.start);
   };
 
+  const handleStartRecording = () => {
+    setIsPlaying(false);
+    if (recordingMode === 'insert') {
+      setRecordingStartTime(currentTime);
+    } else {
+      let appendTime = 0;
+      const selectedClips = clips.filter(c => selectedClipIds.includes(c.id));
+      if (selectedClips.length > 0) {
+        // Append to the end of the last selected clip
+        appendTime = Math.max(...selectedClips.map(c => c.timelinePosition.end));
+      } else {
+        // No clip selected, append to the end of the last clip on the selected track
+        const trackClips = clips.filter(c => c.trackId === selectedTrackId);
+        if (trackClips.length > 0) {
+          appendTime = Math.max(...trackClips.map(c => c.timelinePosition.end));
+        } else {
+          // No clips on track, start at 0:00
+          appendTime = 0;
+        }
+      }
+      setRecordingStartTime(appendTime);
+      setCurrentTime(appendTime);
+    }
+  };
+
   const handleRecordingComplete = async (videoUrl: string, duration: number, blob: Blob) => {
     const targetTrack = tracks.find(t => t.id === selectedTrackId);
     if (!targetTrack) return;
@@ -442,12 +486,13 @@ export default function App() {
         if (index !== -1) {
           const clip = nextClips[index];
           const duration = clip.timelinePosition.end - clip.timelinePosition.start;
+          const clampedStart = Math.max(0, newStart);
           nextClips[index] = {
             ...clip,
             trackId: newTrackId || clip.trackId,
             timelinePosition: {
-              start: newStart,
-              end: newStart + duration,
+              start: clampedStart,
+              end: clampedStart + duration,
             },
           };
         }
@@ -506,7 +551,7 @@ export default function App() {
     setTracks(tracks.map(t => t.id === trackId ? { ...t, ...updates } : t));
   };
 
-  const handleAddTextClip = (type: TrackType.TEXT | TrackType.SUBTITLE) => {
+  const handleAddTextClip = async (type: TrackType.TEXT | TrackType.SUBTITLE, startTime?: number) => {
     const targetTrack = tracks.find(t => t.id === selectedTrackId && t.type === type);
     if (!targetTrack) {
       alert(`Please select a ${type} track first.`);
@@ -514,6 +559,7 @@ export default function App() {
     }
 
     const newId = Date.now();
+    const actualStartTime = Math.max(0, startTime !== undefined ? startTime : currentTime);
     const newClip: VideoClip = {
       id: newId,
       trackId: selectedTrackId,
@@ -523,8 +569,8 @@ export default function App() {
       duration: 5,
       sourceStart: 0,
       timelinePosition: {
-        start: currentTime,
-        end: currentTime + 5,
+        start: actualStartTime,
+        end: actualStartTime + 5,
       },
       style: {
         fontSize: 24,
@@ -532,6 +578,13 @@ export default function App() {
         backgroundColor: 'transparent',
       }
     };
+
+    try {
+      await videoDB.saveClip(newClip);
+      setStorageError(null);
+    } catch (err) {
+      console.error("Failed to save text clip to IndexedDB:", err);
+    }
 
     pushToHistory([...clips, newClip]);
   };
@@ -543,19 +596,23 @@ export default function App() {
 
       let updatedClip: VideoClip;
 
+      const isMedia = clip.type === TrackType.VIDEO || clip.type === TrackType.AUDIO;
+
       if (side === 'left') {
         const maxStart = clip.timelinePosition.end - 0.1; // Min 0.1s duration
         const clampedStart = Math.max(0, Math.min(newTime, maxStart));
         const delta = clampedStart - clip.timelinePosition.start;
         
-        // Ensure we don't trim before source start
-        if (clip.sourceStart + delta < 0) return prev;
-        // Ensure we don't trim past source end
-        if (clip.sourceStart + delta > clip.duration) return prev;
+        if (isMedia) {
+          // Ensure we don't trim before source start
+          if (clip.sourceStart + delta < 0) return prev;
+          // Ensure we don't trim past source end
+          if (clip.sourceStart + delta > clip.duration) return prev;
+        }
 
         updatedClip = {
           ...clip,
-          sourceStart: clip.sourceStart + delta,
+          sourceStart: isMedia ? clip.sourceStart + delta : clip.sourceStart,
           timelinePosition: {
             ...clip.timelinePosition,
             start: clampedStart,
@@ -566,8 +623,10 @@ export default function App() {
         const clampedEnd = Math.max(newTime, minEnd);
         const duration = clampedEnd - clip.timelinePosition.start;
         
-        // Ensure we don't trim past source end
-        if (clip.sourceStart + duration > clip.duration) return prev;
+        if (isMedia) {
+          // Ensure we don't trim past source end
+          if (clip.sourceStart + duration > clip.duration) return prev;
+        }
 
         updatedClip = {
           ...clip,
@@ -745,6 +804,21 @@ export default function App() {
     }
   };
 
+  const handleMoveTrack = (id: string, direction: 'up' | 'down') => {
+    const index = tracks.findIndex(t => t.id === id);
+    if (index === -1) return;
+    
+    const newTracks = [...tracks];
+    const targetIndex = direction === 'up' ? index - 1 : index + 1;
+    
+    if (targetIndex >= 0 && targetIndex < tracks.length) {
+      const temp = newTracks[index];
+      newTracks[index] = newTracks[targetIndex];
+      newTracks[targetIndex] = temp;
+      setTracks(newTracks);
+    }
+  };
+
   const handleExportZip = async () => {
     setIsExportMenuOpen(false);
     setIsLoading(true);
@@ -773,6 +847,21 @@ export default function App() {
         hasErrors = true;
       }
     });
+
+    // Add project manifest with track hierarchy
+    const projectManifest = {
+      version: "1.0",
+      exportDate: new Date().toISOString(),
+      tracks: tracks.map((t, idx) => ({
+        ...t,
+        layerPriority: tracks.length - idx // Top track has highest priority
+      })),
+      clips: clips.map(c => ({
+        ...c,
+        layerPriority: tracks.length - tracks.findIndex(t => t.id === c.trackId)
+      }))
+    };
+    zip.file("project.json", JSON.stringify(projectManifest, null, 2));
 
     await Promise.all(downloadPromises);
 
@@ -808,7 +897,9 @@ export default function App() {
   };
 
   const handleExportSingle = () => {
-    alert("Single video file export requires server-side processing or FFmpeg.wasm. For this demo, please use the 'Compressed Folder' option to get all your clips.");
+    // The track hierarchy (top tracks rendered over bottom tracks) is now fully supported in the preview.
+    // A single video export would follow this same layering logic using a canvas-based compositor or FFmpeg.
+    alert("Single video file export with track layering is currently in development. The preview already correctly reflects your track hierarchy (top tracks appear above bottom tracks)!");
     setIsExportMenuOpen(false);
   };
 
@@ -966,11 +1057,35 @@ export default function App() {
     handleImportClick
   ]);
 
+  useEffect(() => {
+    const handleMouseMove = (e: MouseEvent) => {
+      if (!isResizing) return;
+      const newHeight = window.innerHeight - e.clientY;
+      setTimelineHeight(Math.max(150, Math.min(window.innerHeight - 200, newHeight)));
+    };
+
+    const handleMouseUp = () => {
+      setIsResizing(false);
+      document.body.style.cursor = 'default';
+    };
+
+    if (isResizing) {
+      window.addEventListener('mousemove', handleMouseMove);
+      window.addEventListener('mouseup', handleMouseUp);
+      document.body.style.cursor = 'row-resize';
+    }
+
+    return () => {
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [isResizing]);
+
   return (
     <div className="min-h-screen bg-[#1A1A1A] text-white flex flex-col font-sans overscroll-none">
       {/* Restore Session Prompt */}
       {showRestorePrompt && (
-        <div className="fixed inset-0 z-[200] bg-black/80 flex items-center justify-center p-4 backdrop-blur-md">
+        <div className="fixed inset-0 z-[400] bg-black/80 flex items-center justify-center p-4 backdrop-blur-md">
           <div className="bg-[#1A1A1A] border border-white/10 rounded-2xl p-8 max-w-md w-full shadow-2xl">
             <div className="flex items-center space-x-3 mb-6">
               <div className="p-3 bg-blue-600/20 rounded-xl">
@@ -1017,7 +1132,7 @@ export default function App() {
       )}
 
       {/* Header */}
-      <header className="h-14 border-b border-white/10 flex items-center justify-between px-6 bg-[#111]">
+      <header className="h-14 border-b border-white/10 flex items-center justify-between px-6 bg-[#111] shrink-0">
         <div className="flex items-center space-x-6">
           <div className="flex items-center space-x-3">
             <div className="w-8 h-8 bg-blue-600 rounded flex items-center justify-center">
@@ -1139,7 +1254,7 @@ export default function App() {
 
       {/* Global Loader */}
       {isLoading && (
-        <div className="fixed inset-0 z-[300] bg-black/60 backdrop-blur-sm flex items-center justify-center">
+        <div className="fixed inset-0 z-[500] bg-black/60 backdrop-blur-sm flex items-center justify-center">
           <div className="bg-[#1A1A1A] border border-white/10 rounded-2xl p-8 flex flex-col items-center space-y-4 shadow-2xl animate-in zoom-in duration-300">
             <div className="relative w-12 h-12">
               <div className="absolute inset-0 border-4 border-blue-600/20 rounded-full" />
@@ -1154,36 +1269,31 @@ export default function App() {
       )}
 
       {/* Main Content Area */}
-      <main className="flex-grow flex items-center justify-center p-8 bg-gradient-to-b from-[#1A1A1A] to-[#0D0D0D] overflow-hidden">
+      <main className="flex-grow min-h-0 flex items-center justify-end p-4 bg-gradient-to-b from-[#1A1A1A] to-[#0D0D0D] overflow-hidden">
         <div className="w-full max-w-7xl grid grid-cols-2 gap-8">
-          {/* Left Side: Recorder */}
-          <div className="animate-in slide-in-from-left duration-500">
-            <Recorder 
-              onRecordingComplete={handleRecordingComplete}
-              onStartRecording={() => {
-                setIsPlaying(false);
-                if (recordingMode === 'insert') {
-                  setRecordingStartTime(currentTime);
-                } else {
-                  let appendTime = 0;
-                  const selectedClips = clips.filter(c => selectedClipIds.includes(c.id));
-                  if (selectedClips.length > 0) {
-                    // Append to the end of the last selected clip (by timeline position)
-                    appendTime = Math.max(...selectedClips.map(c => c.timelinePosition.end));
-                  } else {
-                    // Append to the end of the timeline
-                    appendTime = clips.reduce((max, clip) => Math.max(max, clip.timelinePosition.end), 0);
-                  }
-                  setRecordingStartTime(appendTime);
-                  setCurrentTime(appendTime);
-                }
-              }}
-            />
+          {/* Left Side: Recorder or Text Editor */}
+          <div className="max-w-[600px] aspect-video overflow-y-auto animate-in slide-in-from-left duration-500">
+            {selectedClipIds.length === 1 && (clips.find(c => c.id === selectedClipIds[0])?.type === TrackType.TEXT || clips.find(c => c.id === selectedClipIds[0])?.type === TrackType.SUBTITLE) ? (
+              <TextEditor 
+                clip={clips.find(c => c.id === selectedClipIds[0])!}
+                onUpdate={handleClipUpdate}
+              />
+            ) : tracks.find(t => t.id === selectedTrackId)?.type === TrackType.AUDIO ? (
+              <AudioRecorder 
+                onRecordingComplete={handleRecordingComplete}
+                onStartRecording={handleStartRecording}
+              />
+            ) : (
+              <Recorder 
+                onRecordingComplete={handleRecordingComplete}
+                onStartRecording={handleStartRecording}
+              />
+            )}
           </div>
 
           {/* Right Side: Video Preview Area */}
           <div className="flex flex-col items-center justify-center">
-            <div className="w-full aspect-video relative group rounded-2xl overflow-hidden border border-white/10 shadow-2xl">
+            <div className="w-full max-w-[600px] aspect-video relative group overflow-hidden border border-white/10 shadow-2xl">
               <VideoPreview 
                 clips={clips} 
                 tracks={tracks}
@@ -1192,32 +1302,28 @@ export default function App() {
               />
               
               {/* Overlay Play Button (Visible on hover or when paused) */}
+              {/* 
               {!isPlaying && (
                 <div className="absolute inset-0 flex items-center justify-center z-30 bg-black/20 group-hover:bg-black/40 transition-colors pointer-events-none">
                   <div 
-                    className="w-16 h-16 bg-white/10 backdrop-blur-md rounded-full flex items-center justify-center border border-white/20 scale-110 pointer-events-auto cursor-pointer" 
+                    className="w-12 h-12 bg-white/10 backdrop-blur-md rounded-full flex items-center justify-center border border-white/20 scale-110 pointer-events-auto cursor-pointer" 
                     onClick={togglePlay}
                   >
-                    <Play size={32} className="ml-1" />
+                    <Play size={24} className="ml-1" />
                   </div>
                 </div>
               )}
+              */}
             </div>
 
             {/* Playback Controls */}
-            <div className="mt-8 flex items-center space-x-8">
+            <div className="mt-4 flex items-center space-x-8">
               <div className="flex items-center space-x-4">
-                <button onClick={reset} className="p-2 hover:bg-white/5 rounded-full transition-colors text-gray-400 hover:text-white">
-                  <SkipBack size={20} />
-                </button>
                 <button 
                   onClick={togglePlay}
-                  className="w-12 h-12 bg-white text-black rounded-full flex items-center justify-center hover:bg-gray-200 transition-colors shadow-lg"
+                  className="size-8 bg-white text-black flex items-center justify-center hover:bg-gray-200 transition-colors shadow-lg"
                 >
-                  {isPlaying ? <Pause size={24} /> : <Play size={24} className="ml-1" />}
-                </button>
-                <button className="p-2 hover:bg-white/5 rounded-full transition-colors text-gray-400 hover:text-white">
-                  <SkipForward size={20} />
+                  {isPlaying ? <Pause size={16} /> : <Play size={16} className="ml-0.5" />}
                 </button>
               </div>
             </div>
@@ -1225,9 +1331,16 @@ export default function App() {
         </div>
       </main>
 
+      {/* Resize Handle */}
+      <div 
+        className="h-1 bg-white/5 hover:bg-blue-600/50 cursor-row-resize transition-colors z-[100] shrink-0"
+        onMouseDown={() => setIsResizing(true)}
+      />
+
       {/* Timeline Section */}
-      <section className="bg-white text-black">
-        <Timeline 
+      <section className="bg-white text-black overflow-hidden shrink-0" style={{ height: `${timelineHeight}px` }}>
+        <div className="h-full max-h-full overflow-hidden">
+          <Timeline 
           clips={clips} 
           tracks={tracks}
           selectedTrackId={selectedTrackId}
@@ -1235,11 +1348,13 @@ export default function App() {
           onTrackUpdate={handleUpdateTrack}
           onTrackDelete={handleDeleteTrack}
           onTrackDuplicate={handleDuplicateTrack}
+          onTrackMove={handleMoveTrack}
           onAddTrack={handleAddTrack}
           onAddTextClip={handleAddTextClip}
           currentTime={currentTime} 
           onTimeChange={(time) => {
-            setCurrentTime(time);
+            const clampedTime = Math.max(0, time);
+            setCurrentTime(clampedTime);
             if (isPlaying) setIsPlaying(false);
           }}
           onClipsUpdate={handleClipsUpdate}
@@ -1258,6 +1373,7 @@ export default function App() {
           downloadedClipIds={downloadedClipIds}
           totalDuration={totalDuration}
         />
+        </div>
       </section>
 
       {/* Hidden File Input for Import */}

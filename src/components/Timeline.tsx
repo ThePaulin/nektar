@@ -2,7 +2,8 @@ import React, { useRef, useEffect, useState } from 'react';
 import { motion } from 'motion/react';
 import { 
   Plus, Scissors, Trash2, ZoomIn, ZoomOut, Download, CheckCircle2, 
-  Eye, EyeOff, Lock, Unlock, Volume2, VolumeX, MoreVertical, Copy, Trash
+  Eye, EyeOff, Lock, Unlock, Volume2, VolumeX, MoreVertical, Copy, Trash,
+  ChevronUp, ChevronDown
 } from 'lucide-react';
 import { VideoClip, VideoObjType, Track, TrackType } from '../types';
 import { ThumbnailStrip } from './ThumbnailStrip';
@@ -31,13 +32,22 @@ interface TimelineProps {
   onTrackUpdate: (id: string, updates: Partial<Track>) => void;
   onTrackDelete: (id: string) => void;
   onTrackDuplicate: (id: string) => void;
+  onTrackMove: (id: string, direction: 'up' | 'down') => void;
   onAddTrack: (type: TrackType) => void;
+  onAddTextClip?: (type: TrackType.TEXT | TrackType.SUBTITLE, startTime?: number) => void;
   initialPixelsPerSecond?: number;
   totalDuration?: number;
 }
 
-const TRACK_HEIGHT = 80;
 const TRACK_HEADER_WIDTH = 200;
+
+type TrackHeightMode = 'sm' | 'md' | 'lg';
+
+const TRACK_HEIGHTS: Record<TrackHeightMode, number> = {
+  sm: 48,
+  md: 80,
+  lg: 120
+};
 
 export const Timeline: React.FC<TimelineProps> = ({
   clips,
@@ -61,6 +71,7 @@ export const Timeline: React.FC<TimelineProps> = ({
   onTrackUpdate,
   onTrackDelete,
   onTrackDuplicate,
+  onTrackMove,
   onAddTrack,
   onAddTextClip,
   onClipContentUpdate,
@@ -82,6 +93,8 @@ export const Timeline: React.FC<TimelineProps> = ({
   const [initialDragPositions, setInitialDragPositions] = useState<{ [id: number]: { start: number; trackId: string } }>({});
   const [selectionRect, setSelectionRect] = useState<{ startX: number; startY: number; endX: number; endY: number } | null>(null);
   const [isSelecting, setIsSelecting] = useState(false);
+  const [trackHeightMode, setTrackHeightMode] = useState<TrackHeightMode>('md');
+  const trackHeight = TRACK_HEIGHTS[trackHeightMode];
   const [hasDragged, setHasDragged] = useState(false);
   const selectionStartRef = useRef<{ x: number; y: number } | null>(null);
   const initialSelectionRef = useRef<number[]>([]);
@@ -195,10 +208,16 @@ export const Timeline: React.FC<TimelineProps> = ({
       }
       if (!foundSnap) setSnappedPoint(null);
 
-      const deltaX = newAnchorStart - anchorInitial.start;
+      let deltaX = newAnchorStart - anchorInitial.start;
+      
+      // Clamp deltaX so that no selected clip starts before 0
+      const minStart = Math.min(...selectedClipIds.map(id => initialDragPositions[id]?.start || 0));
+      if (minStart + deltaX < 0) {
+        deltaX = -minStart;
+      }
       
       // Track switching logic
-      const trackIndex = Math.floor(y / TRACK_HEIGHT);
+      const trackIndex = Math.floor(y / trackHeight);
       const targetTrack = tracks[trackIndex];
       let newTrackId = anchorInitial.trackId;
       
@@ -212,7 +231,7 @@ export const Timeline: React.FC<TimelineProps> = ({
         
         return {
           id,
-          newStart: Math.max(0, initial.start + deltaX),
+          newStart: initial.start + deltaX,
           newTrackId: id === draggingClipId ? newTrackId : undefined
         };
       }).filter((u): u is { id: number; newStart: number; newTrackId?: string } => u !== null);
@@ -290,8 +309,8 @@ export const Timeline: React.FC<TimelineProps> = ({
           const clipX2 = clip.timelinePosition.end * pixelsPerSecond;
           
           const trackIndex = tracks.findIndex(t => t.id === clip.trackId);
-          const clipY1 = trackIndex * TRACK_HEIGHT;
-          const clipY2 = clipY1 + TRACK_HEIGHT;
+          const clipY1 = trackIndex * trackHeight;
+          const clipY2 = clipY1 + trackHeight;
           
           return (
             clipX1 < x2 &&
@@ -391,6 +410,30 @@ export const Timeline: React.FC<TimelineProps> = ({
     setPixelsPerSecond(clampedZoom);
   };
 
+  const handleRulerMouseDown = (e: React.MouseEvent) => {
+    if (headerScrollRef.current) {
+      const rect = headerScrollRef.current.getBoundingClientRect();
+      const x = e.clientX - rect.left + headerScrollRef.current.scrollLeft;
+      let newTime = Math.max(0, Math.min(totalDuration, x / pixelsPerSecond));
+
+      // Snapping logic
+      const snapPoints = [0, totalDuration, ...clips.flatMap(c => [c.timelinePosition.start, c.timelinePosition.end])];
+      let foundSnap = false;
+      for (const point of snapPoints) {
+        if (Math.abs(newTime * pixelsPerSecond - point * pixelsPerSecond) < SNAP_THRESHOLD_PX) {
+          newTime = point;
+          setSnappedPoint(point);
+          foundSnap = true;
+          break;
+        }
+      }
+      if (!foundSnap) setSnappedPoint(null);
+
+      onTimeChange(newTime);
+      setIsDraggingPlayhead(true);
+    }
+  };
+
   const handleTimelineMouseDown = (e: React.MouseEvent) => {
     if (tracksScrollRef.current) {
       const rect = tracksScrollRef.current.getBoundingClientRect();
@@ -448,7 +491,7 @@ export const Timeline: React.FC<TimelineProps> = ({
   return (
     <div 
       ref={timelineRootRef}
-      className={`flex flex-col w-full bg-[#F5F5F5] border-t border-gray-200 select-none h-64 overflow-hidden !overscroll-none touch-pan-y ${
+      className={`flex flex-col w-full bg-[#F5F5F5] border-t border-gray-200 select-none h-full overflow-hidden overscroll-x-none touch-pan-y ${
         isDraggingPlayhead || draggingClipId !== null || trimmingClipId !== null || isSelecting ? 'cursor-grabbing' : ''
       }`}
     >
@@ -457,7 +500,11 @@ export const Timeline: React.FC<TimelineProps> = ({
         <div className="w-[200px] shrink-0 bg-gray-50 border-r border-gray-200 flex items-center px-3">
           <span className="text-[10px] font-bold text-gray-400 uppercase tracking-wider">Tracks</span>
         </div>
-        <div ref={headerScrollRef} className="flex-1 overflow-hidden !overscroll-none relative bg-[#F5F5F5]">
+        <div 
+          ref={headerScrollRef} 
+          className="flex-1 overflow-hidden overscroll-x-none relative bg-[#F5F5F5] cursor-pointer"
+          onMouseDown={handleRulerMouseDown}
+        >
           <div style={{ width: totalDuration * pixelsPerSecond + 100 }} className="h-full relative">
             {ticks.map((tick) => (
               <div 
@@ -465,7 +512,9 @@ export const Timeline: React.FC<TimelineProps> = ({
                 className="absolute flex flex-col items-center bottom-0"
                 style={{ left: tick * pixelsPerSecond }}
               >
-                <span className="text-[10px] text-gray-500 mb-1">{formatTime(tick)}</span>
+                <div className="relative">
+                  <span className="absolute bottom-0 text-[10px] text-gray-500 mb-1">{formatTime(tick)}</span>
+                </div>
                 <div className="w-px h-2 bg-gray-300" />
               </div>
             ))}
@@ -474,23 +523,25 @@ export const Timeline: React.FC<TimelineProps> = ({
       </div>
 
       {/* Scrollable Body */}
-      <div className="flex-1 overflow-y-auto overflow-x-hidden">
+      <div className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden">
         <div className="flex min-h-full">
           {/* Sidebar Body */}
           <div className="w-[200px] shrink-0 bg-white border-r border-gray-200 flex flex-col">
             {tracks.map((track) => (
               <div 
                 key={track.id}
-                className={`h-20 border-b border-gray-100 px-3 flex flex-col justify-center space-y-2 cursor-pointer transition-colors ${
-                  selectedTrackId === track.id ? 'bg-blue-50/50' : 'hover:bg-gray-50'
-                }`}
+                className="border-b border-gray-100 px-3 flex flex-col justify-center space-y-1 cursor-pointer transition-all hover:bg-gray-50"
+                style={{ 
+                  height: trackHeight,
+                  backgroundColor: selectedTrackId === track.id ? 'rgba(59, 130, 246, 0.05)' : 'transparent'
+                }}
                 onClick={() => onTrackSelect(track.id)}
               >
                 <div className="flex items-center justify-between">
                   <span className={`text-xs font-medium truncate ${selectedTrackId === track.id ? 'text-blue-600' : 'text-gray-700'}`}>
                     {track.name}
                   </span>
-                  <div className="flex items-center space-x-1">
+                  <div className={`flex items-center space-x-1 ${trackHeightMode === 'sm' ? 'scale-90 origin-right' : ''}`}>
                     <button 
                       onClick={(e) => { e.stopPropagation(); onTrackUpdate(track.id, { isVisible: !track.isVisible }); }}
                       className={`p-1 rounded hover:bg-gray-200 transition-colors ${track.isVisible ? 'text-gray-400' : 'text-blue-500'}`}
@@ -513,19 +564,29 @@ export const Timeline: React.FC<TimelineProps> = ({
                     )}
                   </div>
                 </div>
-                <div className="flex items-center space-x-2">
+                <div className={`flex items-center space-x-2 ${trackHeightMode === 'sm' ? 'scale-90 origin-left' : ''}`}>
                   <span className="text-[9px] px-1.5 py-0.5 rounded bg-gray-100 text-gray-500 uppercase font-bold">
                     {track.type}
                   </span>
-                  {(track.type === TrackType.TEXT || track.type === TrackType.SUBTITLE) && (
-                    <button 
-                      onClick={(e) => { e.stopPropagation(); onTrackSelect(track.id); onAddTextClip?.(track.type as TrackType.TEXT | TrackType.SUBTITLE); }}
-                      className="text-[9px] px-1.5 py-0.5 rounded bg-blue-100 text-blue-600 uppercase font-bold hover:bg-blue-200 transition-all"
-                    >
-                      + Entry
-                    </button>
-                  )}
                   <div className="flex-1" />
+                  <div className="flex items-center space-x-1">
+                    <button 
+                      onClick={(e) => { e.stopPropagation(); onTrackMove(track.id, 'up'); }}
+                      disabled={tracks.indexOf(track) === 0}
+                      className="p-1 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded transition-all disabled:opacity-20 disabled:cursor-not-allowed"
+                      title="Move Track Up"
+                    >
+                      <ChevronUp size={12} />
+                    </button>
+                    <button 
+                      onClick={(e) => { e.stopPropagation(); onTrackMove(track.id, 'down'); }}
+                      disabled={tracks.indexOf(track) === tracks.length - 1}
+                      className="p-1 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded transition-all disabled:opacity-20 disabled:cursor-not-allowed"
+                      title="Move Track Down"
+                    >
+                      <ChevronDown size={12} />
+                    </button>
+                  </div>
                   <button 
                     onClick={(e) => { e.stopPropagation(); onTrackDuplicate(track.id); }}
                     className="p-1 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded transition-all"
@@ -579,7 +640,7 @@ export const Timeline: React.FC<TimelineProps> = ({
           {/* Tracks Area */}
           <div 
             ref={tracksScrollRef}
-            className="flex-1 relative overflow-x-auto overflow-y-hidden !overscroll-none touch-pan-y scrollbar-thin scrollbar-thumb-gray-300 scrollbar-track-transparent"
+            className="flex-1 relative overflow-x-auto overflow-y-hidden overscroll-x-none touch-pan-y scrollbar-thin scrollbar-thumb-gray-300 scrollbar-track-transparent"
             onMouseDown={handleTimelineMouseDown}
             onScroll={handleTracksScroll}
           >
@@ -592,7 +653,17 @@ export const Timeline: React.FC<TimelineProps> = ({
                 {tracks.map((track) => (
                   <div 
                     key={track.id}
-                    className={`relative h-20 border-b border-gray-200/50 ${selectedTrackId === track.id ? 'bg-blue-50/20' : ''}`}
+                    className={`relative border-b border-gray-200/50 transition-all ${selectedTrackId === track.id ? 'bg-blue-50/20' : ''}`}
+                    style={{ height: trackHeight }}
+                    onDoubleClick={(e) => {
+                      if (track.type === TrackType.TEXT || track.type === TrackType.SUBTITLE) {
+                        const rect = e.currentTarget.getBoundingClientRect();
+                        const x = e.clientX - rect.left + (tracksScrollRef.current?.scrollLeft || 0);
+                        const startTime = x / pixelsPerSecond;
+                        onTrackSelect(track.id);
+                        onAddTextClip?.(track.type as TrackType.TEXT | TrackType.SUBTITLE, startTime);
+                      }
+                    }}
                   >
                     {/* Grid Lines */}
                     <div className="absolute inset-0 pointer-events-none">
@@ -617,13 +688,14 @@ export const Timeline: React.FC<TimelineProps> = ({
                     return (
                       <div
                         key={clip.id}
-                        className={`absolute h-16 top-2 bg-black rounded-md border-2 overflow-hidden group shadow-lg cursor-grab active:cursor-grabbing transition-[border-color,transform,shadow,ring] ${
+                        className={`absolute top-2 bg-black rounded-md border-2 overflow-hidden group shadow-lg cursor-grab active:cursor-grabbing transition-[border-color,transform,shadow,ring] ${
                           draggingClipId === clip.id ? 'border-blue-500 z-40 scale-[1.02] shadow-blue-500/30 !transition-none' : 
                           isSelected ? 'border-blue-500 z-30 shadow-blue-500/40 ring-2 ring-blue-500/20' : 'border-gray-800'
                         }`}
                         style={{
                           left: start * pixelsPerSecond,
                           width: duration * pixelsPerSecond,
+                          height: trackHeight - 16
                         }}
                         onMouseDown={(e) => {
                           e.stopPropagation();
@@ -786,13 +858,29 @@ export const Timeline: React.FC<TimelineProps> = ({
     </div>
 
     {/* Timeline Controls Footer */}
-      <div className="h-10 border-t border-gray-200 bg-white flex items-center px-4 justify-between">
+      <div className="h-10 border-t border-gray-200 bg-white flex items-center px-4 justify-between shrink-0">
         <div className="flex items-center space-x-6">
           <span className="text-xs font-mono text-gray-600 w-24">
             {formatTime(currentTime)} / {formatTime(totalDuration)}
           </span>
           
           <div className="flex items-center space-x-2 border-l border-gray-200 pl-6">
+            <div className="flex items-center bg-gray-100 rounded-md p-0.5 mr-4">
+              {(['sm', 'md', 'lg'] as TrackHeightMode[]).map((mode) => (
+                <button
+                  key={mode}
+                  onClick={() => setTrackHeightMode(mode)}
+                  className={`px-2 py-1 text-[10px] font-bold uppercase rounded transition-all ${
+                    trackHeightMode === mode 
+                      ? 'bg-white text-blue-600 shadow-sm' 
+                      : 'text-gray-400 hover:text-gray-600'
+                  }`}
+                >
+                  {mode}
+                </button>
+              ))}
+            </div>
+
             <button 
               onClick={() => handleZoom(pixelsPerSecond * 0.8)}
               className="p-1 hover:bg-gray-100 rounded text-gray-500 transition-colors"

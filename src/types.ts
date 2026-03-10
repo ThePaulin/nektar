@@ -25,9 +25,16 @@ export interface VideoClip {
   content?: string; // For text/subtitles
   style?: {
     fontSize?: number;
+    fontWeight?: string | number;
+    fontStyle?: string;
+    fontStretch?: string;
+    lineHeight?: number | string;
+    fontFamily?: string;
     color?: string;
     backgroundColor?: string;
     position?: { x: number; y: number };
+    scale?: number;
+    rotation?: number;
   };
 }
 

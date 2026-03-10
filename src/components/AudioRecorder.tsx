@@ -1,18 +1,17 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Camera, Square, Circle, X } from 'lucide-react';
+import { Mic, Square, Circle, X } from 'lucide-react';
 
-interface RecorderProps {
-  onRecordingComplete: (videoUrl: string, duration: number, blob: Blob) => void;
+interface AudioRecorderProps {
+  onRecordingComplete: (audioUrl: string, duration: number, blob: Blob) => void;
   onStartRecording?: () => void;
   onClose?: () => void;
 }
 
-export const Recorder: React.FC<RecorderProps> = ({ onRecordingComplete, onStartRecording, onClose }) => {
+export const AudioRecorder: React.FC<AudioRecorderProps> = ({ onRecordingComplete, onStartRecording, onClose }) => {
   const [isRecording, setIsRecording] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
   const [stream, setStream] = useState<MediaStream | null>(null);
   const [recordingTime, setRecordingTime] = useState(0);
-  const videoRef = useRef<HTMLVideoElement>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
   const startTimeRef = useRef<number>(0);
@@ -32,17 +31,14 @@ export const Recorder: React.FC<RecorderProps> = ({ onRecordingComplete, onStart
   }, [onRecordingComplete, onStartRecording]);
 
   useEffect(() => {
-    async function setupCamera() {
+    async function setupAudio() {
       try {
         const mediaStream = await navigator.mediaDevices.getUserMedia({
-          video: { width: 1280, height: 720 },
-          audio: true
+          audio: true,
+          video: false
         });
         setStream(mediaStream);
-        if (videoRef.current) {
-          videoRef.current.srcObject = mediaStream;
-        }
-
+        
         // Setup visualizer
         const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
         const source = audioContext.createMediaStreamSource(mediaStream);
@@ -63,14 +59,15 @@ export const Recorder: React.FC<RecorderProps> = ({ onRecordingComplete, onStart
           animationFrameRef.current = requestAnimationFrame(updateVisualizer);
         };
         updateVisualizer();
+        
       } catch (err) {
-        console.error("Error accessing camera:", err);
-        alert("Could not access camera. Please ensure permissions are granted.");
+        console.error("Error accessing microphone:", err);
+        alert("Could not access microphone. Please ensure permissions are granted.");
         onClose?.();
       }
     }
 
-    setupCamera();
+    setupAudio();
 
     return () => {
       if (stream) {
@@ -85,10 +82,10 @@ export const Recorder: React.FC<RecorderProps> = ({ onRecordingComplete, onStart
   const startRecording = () => {
     if (!stream) return;
 
-    const mimeType = 'video/mp4;codecs="avc1.640028"';
+    const mimeType = 'audio/webm;codecs=opus';
     const options = MediaRecorder.isTypeSupported(mimeType) 
       ? { mimeType } 
-      : {}; // Fallback to default if specific codec not supported
+      : {}; 
 
     chunksRef.current = [];
     const mediaRecorder = new MediaRecorder(stream, options);
@@ -101,7 +98,7 @@ export const Recorder: React.FC<RecorderProps> = ({ onRecordingComplete, onStart
     };
 
     mediaRecorder.onstop = () => {
-      const mimeType = mediaRecorder.mimeType || 'video/mp4';
+      const mimeType = mediaRecorder.mimeType || 'audio/webm';
       const blob = new Blob(chunksRef.current, { type: mimeType });
       const url = URL.createObjectURL(blob);
       onRecordingCompleteRef.current(url, accumulatedTimeRef.current, blob);
@@ -186,17 +183,13 @@ export const Recorder: React.FC<RecorderProps> = ({ onRecordingComplete, onStart
   };
 
   return (
-    <div className="w-full flex flex-col bg-[#111] overflow-hidden border border-white/10 shadow-2xl">
-      
-
-      {/* Video Preview */}
-      <div className="relative aspect-video bg-black flex items-center justify-center">
+    <div className="w-full flex flex-col bg-[#111] rounded-2xl overflow-hidden border border-white/10 shadow-2xl">
       {/* Header */}
-      <div className="absolute h-12 bg-none top-0 left-0 z-10 flex items-center justify-between px-4">
+      <div className="h-12 bg-gradient-to-b from-black/60 to-transparent z-10 flex items-center justify-between px-4">
         <div className="flex items-center space-x-2">
           <div className={`w-2 h-2 rounded-full ${isRecording ? 'bg-red-500 animate-pulse' : 'bg-gray-500'}`} />
           <span className="text-[10px] font-medium text-white uppercase tracking-wider">
-            {isRecording ? 'Recording' : 'Camera Preview'}
+            {isRecording ? 'Recording Audio' : 'Audio Preview'}
           </span>
         </div>
         {onClose && (
@@ -204,32 +197,86 @@ export const Recorder: React.FC<RecorderProps> = ({ onRecordingComplete, onStart
             <X size={16} />
           </button>
         )}
-      </div> 
-        <video 
-          ref={videoRef} 
-          autoPlay 
-          muted 
-          playsInline 
-          className="w-full h-full object-cover"
-        />
+      </div>
 
-        {/* Audio Level Overlay */}
-        <div className="absolute bottom-4 left-4 flex space-x-0.5 h-12 items-end bg-black/40 p-2 rounded-lg backdrop-blur-md border border-white/10">
-          {[...Array(10)].map((_, i) => {
-            const level = i / 10;
-            const isActive = audioLevel > level;
-            return (
+      {/* Audio Visualizer Area */}
+      <div className="relative aspect-video bg-black flex flex-col items-center justify-center overflow-hidden">
+        {/* Background pulses based on audio level */}
+        <div 
+          className="absolute inset-0 bg-blue-600/5 transition-opacity duration-75"
+          style={{ opacity: audioLevel * 0.5 }}
+        />
+        
+        <div className="relative flex items-center justify-center w-full px-12">
+          {/* Left Level Meter */}
+          <div className="absolute left-8 flex flex-col space-y-0.5 h-32 justify-center">
+            {[...Array(20)].map((_, i) => {
+              const level = (20 - i) / 20;
+              const isActive = audioLevel > level;
+              return (
+                <div 
+                  key={i} 
+                  className={`w-4 h-1 rounded-sm transition-colors duration-75 ${
+                    isActive 
+                      ? i < 4 ? 'bg-red-500' : i < 8 ? 'bg-yellow-500' : 'bg-emerald-500'
+                      : 'bg-white/5'
+                  }`}
+                />
+              );
+            })}
+            <span className="text-[8px] text-gray-500 font-mono mt-1 text-center">L</span>
+          </div>
+
+          <div className="relative flex items-center justify-center">
+            {/* Pulsing circles */}
+            <div 
+              className="absolute w-32 h-32 bg-blue-600/20 rounded-full transition-transform duration-75"
+              style={{ transform: `scale(${1 + audioLevel * 0.5})` }}
+            />
+            <div 
+              className="absolute w-24 h-24 bg-blue-600/40 rounded-full transition-transform duration-75"
+              style={{ transform: `scale(${1 + audioLevel * 0.3})` }}
+            />
+            
+            <div className="relative z-10 w-16 h-16 bg-blue-600 rounded-full flex items-center justify-center shadow-lg shadow-blue-600/40">
+              <Mic size={32} className="text-white" />
+            </div>
+          </div>
+
+          {/* Right Level Meter */}
+          <div className="absolute right-8 flex flex-col space-y-0.5 h-32 justify-center">
+            {[...Array(20)].map((_, i) => {
+              const level = (20 - i) / 20;
+              const isActive = audioLevel > level;
+              return (
+                <div 
+                  key={i} 
+                  className={`w-4 h-1 rounded-sm transition-colors duration-75 ${
+                    isActive 
+                      ? i < 4 ? 'bg-red-500' : i < 8 ? 'bg-yellow-500' : 'bg-emerald-500'
+                      : 'bg-white/5'
+                  }`}
+                />
+              );
+            })}
+            <span className="text-[8px] text-gray-500 font-mono mt-1 text-center">R</span>
+          </div>
+        </div>
+        
+        <div className="mt-6 flex flex-col items-center">
+          <span className="text-xs text-gray-400 font-medium uppercase tracking-widest">Microphone Active</span>
+          <div className="mt-2 flex space-x-1 h-4 items-end">
+            {[...Array(12)].map((_, i) => (
               <div 
                 key={i} 
-                className={`w-1.5 rounded-full transition-all duration-75 ${
-                  isActive 
-                    ? i > 7 ? 'bg-red-500' : i > 5 ? 'bg-yellow-500' : 'bg-emerald-500'
-                    : 'bg-white/10'
-                }`}
-                style={{ height: isActive ? `${20 + audioLevel * 80}%` : '4px' }}
+                className="w-1 bg-blue-500 rounded-full transition-all duration-75"
+                style={{ 
+                  height: `${Math.max(20, audioLevel * 100 * (1 - Math.abs(i - 5.5) / 6))}%`,
+                  opacity: 0.3 + audioLevel * 0.7
+                }}
               />
-            );
-          })}
+            ))}
+          </div>
         </div>
         
         {(isRecording || isPaused) && (
