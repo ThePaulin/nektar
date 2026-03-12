@@ -1,14 +1,14 @@
 import React from 'react';
 import { VideoClip, TrackType } from '../types';
-import { 
-  Type, 
-  Palette, 
-  Maximize, 
-  RotateCw, 
-  Move, 
-  AlignLeft, 
-  Bold, 
-  Italic, 
+import {
+  Type,
+  Palette,
+  Maximize,
+  RotateCw,
+  Move,
+  AlignLeft,
+  Bold,
+  Italic,
   StretchHorizontal,
   ArrowDownUp
 } from 'lucide-react';
@@ -62,7 +62,7 @@ export const TextEditor: React.FC<TextEditorProps> = ({ clip, onUpdate }) => {
         </span>
       </div>
 
-      <div className="flex-grow overflow-y-auto p-6 space-y-8 custom-scrollbar">
+      <div className="h-full flex-grow overflow-y-auto p-6 space-y-8 custom-scrollbar">
         {/* Text Content */}
         <div className="space-y-3">
           <label className="text-[10px] font-bold uppercase tracking-widest text-gray-500 flex items-center space-x-2">
@@ -155,55 +155,55 @@ export const TextEditor: React.FC<TextEditorProps> = ({ clip, onUpdate }) => {
           </div>
 
           <div className="grid grid-cols-3 gap-4">
-             <div className="space-y-2">
-                <span className="text-[10px] text-gray-400 flex items-center space-x-1">
-                  <Italic size={10} />
-                  <span>Style</span>
-                </span>
-                <select
-                  value={clip.style?.fontStyle || 'normal'}
-                  onChange={(e) => handleStyleChange({ fontStyle: e.target.value })}
-                  className="w-full bg-white/5 border border-white/10 rounded-lg px-2 py-1.5 text-[10px] text-white"
-                >
-                  <option value="normal">Normal</option>
-                  <option value="italic">Italic</option>
-                </select>
-             </div>
-             <div className="space-y-2">
-                <span className="text-[10px] text-gray-400 flex items-center space-x-1">
-                  <StretchHorizontal size={10} />
-                  <span>Stretch</span>
-                </span>
-                <select
-                  value={clip.style?.fontStretch || 'normal'}
-                  onChange={(e) => handleStyleChange({ fontStretch: e.target.value })}
-                  className="w-full bg-white/5 border border-white/10 rounded-lg px-2 py-1.5 text-[10px] text-white"
-                >
-                  <option value="normal">Normal</option>
-                  <option value="condensed">Condensed</option>
-                  <option value="expanded">Expanded</option>
-                </select>
-             </div>
-             <div className="space-y-2">
-                <span className="text-[10px] text-gray-400 flex items-center space-x-1">
-                  <ArrowDownUp size={10} />
-                  <span>Line Height</span>
-                </span>
-                <input
-                  type="number"
-                  step="0.1"
-                  value={clip.style?.lineHeight || 1.2}
-                  onChange={(e) => handleStyleChange({ lineHeight: parseFloat(e.target.value) })}
-                  className="w-full bg-white/5 border border-white/10 rounded-lg px-2 py-1.5 text-[10px] text-white"
-                />
-             </div>
+            <div className="space-y-2">
+              <span className="text-[10px] text-gray-400 flex items-center space-x-1">
+                <Italic size={10} />
+                <span>Style</span>
+              </span>
+              <select
+                value={clip.style?.fontStyle || 'normal'}
+                onChange={(e) => handleStyleChange({ fontStyle: e.target.value })}
+                className="w-full bg-white/5 border border-white/10 rounded-lg px-2 py-1.5 text-[10px] text-white"
+              >
+                <option value="normal">Normal</option>
+                <option value="italic">Italic</option>
+              </select>
+            </div>
+            <div className="space-y-2">
+              <span className="text-[10px] text-gray-400 flex items-center space-x-1">
+                <StretchHorizontal size={10} />
+                <span>Stretch</span>
+              </span>
+              <select
+                value={clip.style?.fontStretch || 'normal'}
+                onChange={(e) => handleStyleChange({ fontStretch: e.target.value })}
+                className="w-full bg-white/5 border border-white/10 rounded-lg px-2 py-1.5 text-[10px] text-white"
+              >
+                <option value="normal">Normal</option>
+                <option value="condensed">Condensed</option>
+                <option value="expanded">Expanded</option>
+              </select>
+            </div>
+            <div className="space-y-2">
+              <span className="text-[10px] text-gray-400 flex items-center space-x-1">
+                <ArrowDownUp size={10} />
+                <span>Line Height</span>
+              </span>
+              <input
+                type="number"
+                step="0.1"
+                value={clip.style?.lineHeight || 1.2}
+                onChange={(e) => handleStyleChange({ lineHeight: parseFloat(e.target.value) })}
+                className="w-full bg-white/5 border border-white/10 rounded-lg px-2 py-1.5 text-[10px] text-white"
+              />
+            </div>
           </div>
         </div>
 
         {/* Transform Properties */}
         <div className="space-y-6 pt-4 border-t border-white/5">
           <label className="text-[10px] font-bold uppercase tracking-widest text-gray-500">Transform</label>
-          
+
           <div className="grid grid-cols-2 gap-6">
             <div className="space-y-2">
               <div className="flex justify-between items-center">

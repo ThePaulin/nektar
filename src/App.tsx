@@ -7,11 +7,14 @@ import { AudioRecorder } from './components/AudioRecorder';
 import { TextEditor } from './components/TextEditor';
 import { VideoObjType, VideoClip, RecordingMode, Track, TrackType } from './types';
 import { videoDB } from './services/db';
-import { 
-  Play, Pause, SkipBack, SkipForward, Video, Download, Undo2, Redo2, Radio, 
+import {
+  Play, Pause, SkipBack, SkipForward, Video, Download, Undo2, Redo2, Radio,
   ChevronDown, Archive, FileVideo, History, Trash2, AlertCircle, X, Upload,
   MousePointer2, ArrowRightToLine, Plus, Layers, Music, Type as TypeIcon, Subtitles, Image as ImageIcon
 } from 'lucide-react';
+
+const TIMELINE_MAX_HEIGHT: number = 623;
+const TIMELINE_MIN_HEIGHT: number = 315;
 
 const INITIAL_TRACKS: Track[] = [
   { id: 'track-1', name: 'Video 1', type: TrackType.VIDEO, isVisible: true, isLocked: false, isMuted: false },
@@ -57,7 +60,7 @@ export default function App() {
   const [recordingStartTime, setRecordingStartTime] = useState(0);
   const [recordingMode, setRecordingMode] = useState<RecordingMode>('insert');
   const [isExportMenuOpen, setIsExportMenuOpen] = useState(false);
-  const [timelineHeight, setTimelineHeight] = useState(350);
+  const [timelineHeight, setTimelineHeight] = useState(500);
   const [isResizing, setIsResizing] = useState(false);
   const [showRestorePrompt, setShowRestorePrompt] = useState(false);
   const [pendingRestoredClips, setPendingRestoredClips] = useState<VideoObjType | null>(null);
@@ -121,7 +124,7 @@ export default function App() {
 
   const handleRestore = async () => {
     if (!pendingRestoredClips) return;
-    
+
     setIsLoading(true);
     setLoadingMessage('Restoring session...');
     try {
@@ -131,16 +134,16 @@ export default function App() {
           if (blob) {
             const url = URL.createObjectURL(blob);
             const isImage = clip.type === TrackType.IMAGE;
-            return { 
-              ...clip, 
+            return {
+              ...clip,
               videoUrl: isImage ? undefined : url,
-              thumbnailUrl: isImage ? url : clip.thumbnailUrl 
+              thumbnailUrl: isImage ? url : clip.thumbnailUrl
             };
           }
         }
         return clip;
       }));
-      
+
       if (pendingRestoredTracks) {
         setTracks(pendingRestoredTracks);
       }
@@ -214,9 +217,9 @@ export default function App() {
 
     try {
       const videoUrl = URL.createObjectURL(file);
-      
+
       let duration = 5; // Default for images
-      
+
       if (targetTrack.type === TrackType.VIDEO || targetTrack.type === TrackType.AUDIO) {
         // Get duration
         duration = await new Promise<number>((resolve, reject) => {
@@ -234,7 +237,7 @@ export default function App() {
 
       const newId = Date.now();
       const blobId = `blob_${newId}`;
-      
+
       const newClip: VideoClip = {
         id: newId,
         trackId: selectedTrackId,
@@ -268,7 +271,7 @@ export default function App() {
     if (past.length === 0) return;
     const previous = past[past.length - 1];
     const newPast = past.slice(0, past.length - 1);
-    
+
     setFuture((prev) => [clips, ...prev]);
     setClips(previous);
     setPast(newPast);
@@ -278,7 +281,7 @@ export default function App() {
     if (future.length === 0) return;
     const next = future[0];
     const newFuture = future.slice(1);
-    
+
     setPast((prev) => [...prev, clips]);
     setClips(next);
     setFuture(newFuture);
@@ -602,7 +605,7 @@ export default function App() {
         const maxStart = clip.timelinePosition.end - 0.1; // Min 0.1s duration
         const clampedStart = Math.max(0, Math.min(newTime, maxStart));
         const delta = clampedStart - clip.timelinePosition.start;
-        
+
         if (isMedia) {
           // Ensure we don't trim before source start
           if (clip.sourceStart + delta < 0) return prev;
@@ -622,7 +625,7 @@ export default function App() {
         const minEnd = clip.timelinePosition.start + 0.1;
         const clampedEnd = Math.max(newTime, minEnd);
         const duration = clampedEnd - clip.timelinePosition.start;
-        
+
         if (isMedia) {
           // Ensure we don't trim past source end
           if (clip.sourceStart + duration > clip.duration) return prev;
@@ -682,7 +685,7 @@ export default function App() {
 
   const handleDelete = () => {
     let clipsToDelete: VideoClip[] = [];
-    
+
     if (selectedClipIds.length > 0) {
       clipsToDelete = clips.filter(c => selectedClipIds.includes(c.id));
     } else {
@@ -695,12 +698,12 @@ export default function App() {
     if (clipsToDelete.length > 0) {
       const deleteIds = clipsToDelete.map(c => c.id);
       const newState = clips.filter((c) => !deleteIds.includes(c.id));
-      
+
       clipsToDelete.forEach(clip => {
         const otherClipsUsingBlob = newState.some(c => c.blobId === clip.blobId);
         videoDB.deleteClip(clip.id, !otherClipsUsingBlob ? clip.blobId : undefined);
       });
-      
+
       pushToHistory(newState);
       setSelectedClipIds([]);
     }
@@ -708,7 +711,7 @@ export default function App() {
 
   const handleRippleDelete = () => {
     let clipsToDelete: VideoClip[] = [];
-    
+
     if (selectedClipIds.length > 0) {
       clipsToDelete = clips.filter(c => selectedClipIds.includes(c.id));
     } else {
@@ -720,14 +723,14 @@ export default function App() {
 
     if (clipsToDelete.length > 0) {
       let newState = [...clips];
-      
+
       // Sort clips to delete by start time descending to shift correctly
       const sortedToDelete = [...clipsToDelete].sort((a, b) => b.timelinePosition.start - a.timelinePosition.start);
-      
+
       sortedToDelete.forEach(clip => {
         const duration = clip.timelinePosition.end - clip.timelinePosition.start;
         const start = clip.timelinePosition.start;
-        
+
         newState = newState.filter(c => c.id !== clip.id).map(c => {
           if (c.timelinePosition.start >= start) {
             return {
@@ -740,7 +743,7 @@ export default function App() {
           }
           return c;
         });
-        
+
         // Cleanup IndexedDB
         const otherClipsUsingBlob = newState.some(c => c.blobId === clip.blobId);
         videoDB.deleteClip(clip.id, !otherClipsUsingBlob ? clip.blobId : undefined);
@@ -771,7 +774,7 @@ export default function App() {
     setLoadingMessage(`Downloading ${clip.label}...`);
     try {
       const isExternal = clip.videoUrl.startsWith('http');
-      const downloadUrl = isExternal 
+      const downloadUrl = isExternal
         ? `/api/proxy?url=${encodeURIComponent(clip.videoUrl)}`
         : clip.videoUrl;
 
@@ -807,10 +810,10 @@ export default function App() {
   const handleMoveTrack = (id: string, direction: 'up' | 'down') => {
     const index = tracks.findIndex(t => t.id === id);
     if (index === -1) return;
-    
+
     const newTracks = [...tracks];
     const targetIndex = direction === 'up' ? index - 1 : index + 1;
-    
+
     if (targetIndex >= 0 && targetIndex < tracks.length) {
       const temp = newTracks[index];
       newTracks[index] = newTracks[targetIndex];
@@ -826,11 +829,11 @@ export default function App() {
     const zip = new JSZip();
     const folder = zip.folder("exported_clips");
     let hasErrors = false;
-    
+
     const downloadPromises = clips.map(async (clip, index) => {
       try {
         const isExternal = clip.videoUrl.startsWith('http');
-        const downloadUrl = isExternal 
+        const downloadUrl = isExternal
           ? `/api/proxy?url=${encodeURIComponent(clip.videoUrl)}`
           : clip.videoUrl;
 
@@ -874,7 +877,7 @@ export default function App() {
       a.download = "timeline_export.zip";
       a.click();
       URL.revokeObjectURL(url);
-      
+
       // Mark all clips as downloaded
       setDownloadedClipIds(prev => {
         const newIds = [...prev];
@@ -890,7 +893,7 @@ export default function App() {
     } else {
       alert("Could not export ZIP. Please try downloading clips individually.");
     }
-    
+
     setIsExportMenuOpen(false);
     setIsLoading(false);
     setLoadingMessage('');
@@ -1039,20 +1042,20 @@ export default function App() {
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [
-    clips, 
-    currentTime, 
+    clips,
+    currentTime,
     recordingMode,
-    selectedClipIds, 
-    isPlaying, 
-    totalDuration, 
-    togglePlay, 
-    handleDelete, 
-    handleRippleDelete, 
-    handleSplit, 
-    undo, 
-    redo, 
-    handleExportZip, 
-    handleExportSingle, 
+    selectedClipIds,
+    isPlaying,
+    totalDuration,
+    togglePlay,
+    handleDelete,
+    handleRippleDelete,
+    handleSplit,
+    undo,
+    redo,
+    handleExportZip,
+    handleExportSingle,
     handleClipDownload,
     handleImportClick
   ]);
@@ -1061,6 +1064,20 @@ export default function App() {
     const handleMouseMove = (e: MouseEvent) => {
       if (!isResizing) return;
       const newHeight = window.innerHeight - e.clientY;
+
+      // handle min height allowed
+      if (newHeight < TIMELINE_MIN_HEIGHT) {
+        setTimelineHeight(TIMELINE_MIN_HEIGHT);
+        return;
+      }
+
+      // handle max height allowed
+      if (newHeight > TIMELINE_MAX_HEIGHT) {
+        setTimelineHeight(TIMELINE_MAX_HEIGHT);
+        return;
+      }
+
+      // default case (handle allowed height range)
       setTimelineHeight(Math.max(150, Math.min(window.innerHeight - 200, newHeight)));
     };
 
@@ -1097,13 +1114,13 @@ export default function App() {
               We found an existing project from your last visit. Would you like to continue editing or start a new project?
             </p>
             <div className="flex flex-col space-y-3">
-              <button 
+              <button
                 onClick={handleRestore}
                 className="w-full bg-blue-600 hover:bg-blue-700 text-white py-3 rounded-xl font-bold transition-all flex items-center justify-center space-x-2"
               >
                 <span>Continue Editing</span>
               </button>
-              <button 
+              <button
                 onClick={handleStartFresh}
                 className="w-full bg-white/5 hover:bg-red-600/10 text-gray-400 hover:text-red-400 py-3 rounded-xl font-medium transition-all flex items-center justify-center space-x-2 group"
               >
@@ -1122,7 +1139,7 @@ export default function App() {
             <AlertCircle size={16} />
             <span>{storageError}</span>
           </div>
-          <button 
+          <button
             onClick={() => setStorageError(null)}
             className="p-1 hover:bg-white/20 rounded transition-colors"
           >
@@ -1144,7 +1161,7 @@ export default function App() {
           {selectedClipIds.length > 0 && (
             <div className="flex items-center space-x-2 bg-blue-600/20 text-blue-400 px-2 py-1 rounded border border-blue-600/30 animate-in fade-in duration-300">
               <span className="text-[10px] font-bold uppercase tracking-wider">{selectedClipIds.length} selected</span>
-              <button 
+              <button
                 onClick={() => setSelectedClipIds([])}
                 className="hover:text-white transition-colors"
                 title="Deselect All (Esc)"
@@ -1153,10 +1170,10 @@ export default function App() {
               </button>
             </div>
           )}
-          
+
           {/* Undo/Redo Controls */}
           <div className="flex items-center space-x-1 border-l border-white/10 pl-6">
-            <button 
+            <button
               onClick={undo}
               disabled={past.length === 0}
               className="p-2 hover:bg-white/5 rounded-md transition-colors text-gray-400 hover:text-white disabled:opacity-20 disabled:cursor-not-allowed"
@@ -1164,7 +1181,7 @@ export default function App() {
             >
               <Undo2 size={18} />
             </button>
-            <button 
+            <button
               onClick={redo}
               disabled={future.length === 0}
               className="p-2 hover:bg-white/5 rounded-md transition-colors text-gray-400 hover:text-white disabled:opacity-20 disabled:cursor-not-allowed"
@@ -1180,11 +1197,10 @@ export default function App() {
           <div className="flex items-center bg-white/5 rounded-md p-0.5 border border-white/10">
             <button
               onClick={() => setRecordingMode('insert')}
-              className={`flex items-center space-x-1.5 px-2.5 py-1 rounded-sm text-[10px] font-medium transition-all ${
-                recordingMode === 'insert' 
-                  ? 'bg-blue-600 text-white shadow-sm' 
-                  : 'text-gray-400 hover:text-gray-200'
-              }`}
+              className={`flex items-center space-x-1.5 px-2.5 py-1 rounded-sm text-[10px] font-medium transition-all ${recordingMode === 'insert'
+                ? 'bg-blue-600 text-white shadow-sm'
+                : 'text-gray-400 hover:text-gray-200'
+                }`}
               title="Insert Mode (Shift+I): Record at playhead"
             >
               <MousePointer2 size={12} />
@@ -1192,11 +1208,10 @@ export default function App() {
             </button>
             <button
               onClick={() => setRecordingMode('append')}
-              className={`flex items-center space-x-1.5 px-2.5 py-1 rounded-sm text-[10px] font-medium transition-all ${
-                recordingMode === 'append' 
-                  ? 'bg-blue-600 text-white shadow-sm' 
-                  : 'text-gray-400 hover:text-gray-200'
-              }`}
+              className={`flex items-center space-x-1.5 px-2.5 py-1 rounded-sm text-[10px] font-medium transition-all ${recordingMode === 'append'
+                ? 'bg-blue-600 text-white shadow-sm'
+                : 'text-gray-400 hover:text-gray-200'
+                }`}
               title="Append Mode (Shift+A): Record at end of timeline"
             >
               <ArrowRightToLine size={12} />
@@ -1204,7 +1219,7 @@ export default function App() {
             </button>
           </div>
 
-          <button 
+          <button
             onClick={handleImportClick}
             className="flex items-center space-x-2 bg-white/5 hover:bg-white/10 text-gray-300 px-3 py-1.5 rounded-md text-xs font-medium border border-white/10 transition-colors"
             title="Import Video (Ctrl/Cmd + I)"
@@ -1213,9 +1228,9 @@ export default function App() {
             <span>Import</span>
           </button>
           <button className="text-xs text-gray-400 hover:text-white transition-colors">Project Settings</button>
-          
+
           <div className="relative">
-            <button 
+            <button
               onClick={() => setIsExportMenuOpen(!isExportMenuOpen)}
               className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-1.5 rounded-md text-xs font-medium flex items-center space-x-2 transition-colors"
             >
@@ -1226,7 +1241,7 @@ export default function App() {
 
             {isExportMenuOpen && (
               <div className="absolute right-0 mt-2 w-56 bg-[#1A1A1A] border border-white/10 rounded-lg shadow-2xl z-[110] py-1 overflow-hidden">
-                <button 
+                <button
                   onClick={handleExportZip}
                   className="w-full flex items-center space-x-3 px-4 py-2.5 text-xs text-gray-300 hover:bg-white/5 hover:text-white transition-colors text-left"
                 >
@@ -1236,7 +1251,7 @@ export default function App() {
                     <span className="text-[10px] text-gray-500">All clips as separate files</span>
                   </div>
                 </button>
-                <button 
+                <button
                   onClick={handleExportSingle}
                   className="w-full flex items-center space-x-3 px-4 py-2.5 text-xs text-gray-300 hover:bg-white/5 hover:text-white transition-colors text-left border-t border-white/5"
                 >
@@ -1269,40 +1284,53 @@ export default function App() {
       )}
 
       {/* Main Content Area */}
-      <main className="flex-grow min-h-0 flex items-center justify-end p-4 bg-gradient-to-b from-[#1A1A1A] to-[#0D0D0D] overflow-hidden">
-        <div className="w-full max-w-7xl grid grid-cols-2 gap-8">
+      <main className="flex-grow min-h-0 flex items-start justify-end p-4 bg-gradient-to-b from-[#1A1A1A] to-[#0D0D0D] overflow-hidden"
+      >
+        <div className="relative w-full flex justify-center overflow-hidden items-start gap-8"
+
+          style={{ height: `${((window.innerHeight ?? 0) - timelineHeight)}px` }}
+        >
           {/* Left Side: Recorder or Text Editor */}
-          <div className="max-w-[600px] aspect-video overflow-y-auto animate-in slide-in-from-left duration-500">
-            {selectedClipIds.length === 1 && (clips.find(c => c.id === selectedClipIds[0])?.type === TrackType.TEXT || clips.find(c => c.id === selectedClipIds[0])?.type === TrackType.SUBTITLE) ? (
-              <TextEditor 
-                clip={clips.find(c => c.id === selectedClipIds[0])!}
-                onUpdate={handleClipUpdate}
-              />
+          <div className="h-full w-full max-w-[600px] slide-in-from-left duration-500">
+            {selectedClipIds.length === 1 && (clips.find(c => c.id === selectedClipIds[0])?.type === TrackType.TEXT || clips.find(c => c.id === selectedClipIds[0])?.type === TrackType.SUBTITLE || tracks.find(t => t.id === selectedTrackId)?.type === TrackType.TEXT || tracks.find(t => t.id === selectedTrackId)?.type === TrackType.SUBTITLE) ? (
+              <div className="w-full h-full flex justify-center overflow-y-auto">
+                <TextEditor
+                  clip={clips.find(c => c.id === selectedClipIds[0])!}
+                  onUpdate={handleClipUpdate}
+                />
+              </div>
             ) : tracks.find(t => t.id === selectedTrackId)?.type === TrackType.AUDIO ? (
-              <AudioRecorder 
-                onRecordingComplete={handleRecordingComplete}
-                onStartRecording={handleStartRecording}
-              />
-            ) : (
-              <Recorder 
-                onRecordingComplete={handleRecordingComplete}
-                onStartRecording={handleStartRecording}
-              />
-            )}
+              <div className=" aspect-video w-full">
+                <AudioRecorder
+                  onRecordingComplete={handleRecordingComplete}
+                  onStartRecording={handleStartRecording}
+                />
+              </div>
+            ) : null}
+            {/* always have video preview ready, hide/show using CSS */}
+            <div className={`aspect-video ${(tracks.find(t => t.id === selectedTrackId)?.type === TrackType.VIDEO || (selectedClipIds.length === 1 && clips.find(c => c.id === selectedClipIds[0])?.type === TrackType.VIDEO)) ? 'flex justify-center' : 'hidden'}`}>
+              <div className="">
+                <Recorder
+                  onRecordingComplete={handleRecordingComplete}
+                  onStartRecording={handleStartRecording}
+                />
+              </div>
+            </div>
+
           </div>
 
           {/* Right Side: Video Preview Area */}
-          <div className="flex flex-col items-center justify-center">
-            <div className="w-full max-w-[600px] aspect-video relative group overflow-hidden border border-white/10 shadow-2xl">
-              <VideoPreview 
-                clips={clips} 
+          <div className=" w-fit h-full flex flex-col items-center justify-start">
+            <div className="h-full w-fit group overflow-hidden border border-white/10 shadow-2xl">
+              <VideoPreview
+                clips={clips}
                 tracks={tracks}
-                currentTime={currentTime} 
-                isPlaying={isPlaying} 
+                currentTime={currentTime}
+                isPlaying={isPlaying}
               />
-              
+
               {/* Overlay Play Button (Visible on hover or when paused) */}
-              {/* 
+              {/*
               {!isPlaying && (
                 <div className="absolute inset-0 flex items-center justify-center z-30 bg-black/20 group-hover:bg-black/40 transition-colors pointer-events-none">
                   <div 
@@ -1317,73 +1345,76 @@ export default function App() {
             </div>
 
             {/* Playback Controls */}
-            <div className="mt-4 flex items-center space-x-8">
+            {/* 
+            <div className="mt-2 flex items-center space-x-8">
               <div className="flex items-center space-x-4">
-                <button 
+                <button
                   onClick={togglePlay}
-                  className="size-8 bg-white text-black flex items-center justify-center hover:bg-gray-200 transition-colors shadow-lg"
+                  className="size-6 bg-white text-black flex items-center justify-center hover:bg-gray-200 transition-colors shadow-lg"
                 >
-                  {isPlaying ? <Pause size={16} /> : <Play size={16} className="ml-0.5" />}
+                  {isPlaying ? <Pause size={12} /> : <Play size={12} className="ml-0.5" />}
                 </button>
               </div>
             </div>
+            */}
           </div>
         </div>
-      </main>
+      </main >
 
       {/* Resize Handle */}
-      <div 
+      < div
         className="h-1 bg-white/5 hover:bg-blue-600/50 cursor-row-resize transition-colors z-[100] shrink-0"
-        onMouseDown={() => setIsResizing(true)}
+        onMouseDown={() => setIsResizing(true)
+        }
       />
 
       {/* Timeline Section */}
       <section className="bg-white text-black overflow-hidden shrink-0" style={{ height: `${timelineHeight}px` }}>
         <div className="h-full max-h-full overflow-hidden">
-          <Timeline 
-          clips={clips} 
-          tracks={tracks}
-          selectedTrackId={selectedTrackId}
-          onTrackSelect={setSelectedTrackId}
-          onTrackUpdate={handleUpdateTrack}
-          onTrackDelete={handleDeleteTrack}
-          onTrackDuplicate={handleDuplicateTrack}
-          onTrackMove={handleMoveTrack}
-          onAddTrack={handleAddTrack}
-          onAddTextClip={handleAddTextClip}
-          currentTime={currentTime} 
-          onTimeChange={(time) => {
-            const clampedTime = Math.max(0, time);
-            setCurrentTime(clampedTime);
-            if (isPlaying) setIsPlaying(false);
-          }}
-          onClipsUpdate={handleClipsUpdate}
-          onClipTrim={handleClipTrim}
-          onClipRename={handleClipRename}
-          onClipContentUpdate={handleClipContentUpdate}
-          onClipUpdate={handleClipUpdate}
-          onClipDownload={handleClipDownload}
-          onManipulationStart={handleManipulationStart}
-          onManipulationEnd={handleManipulationEnd}
-          onSplit={handleSplit}
-          onDelete={handleDelete}
-          onRippleDelete={handleRippleDelete}
-          selectedClipIds={selectedClipIds}
-          onSelectionChange={setSelectedClipIds}
-          downloadedClipIds={downloadedClipIds}
-          totalDuration={totalDuration}
-        />
+          <Timeline
+            clips={clips}
+            tracks={tracks}
+            selectedTrackId={selectedTrackId}
+            onTrackSelect={setSelectedTrackId}
+            onTrackUpdate={handleUpdateTrack}
+            onTrackDelete={handleDeleteTrack}
+            onTrackDuplicate={handleDuplicateTrack}
+            onTrackMove={handleMoveTrack}
+            onAddTrack={handleAddTrack}
+            onAddTextClip={handleAddTextClip}
+            currentTime={currentTime}
+            onTimeChange={(time) => {
+              const clampedTime = Math.max(0, time);
+              setCurrentTime(clampedTime);
+              if (isPlaying) setIsPlaying(false);
+            }}
+            onClipsUpdate={handleClipsUpdate}
+            onClipTrim={handleClipTrim}
+            onClipRename={handleClipRename}
+            onClipContentUpdate={handleClipContentUpdate}
+            onClipUpdate={handleClipUpdate}
+            onClipDownload={handleClipDownload}
+            onManipulationStart={handleManipulationStart}
+            onManipulationEnd={handleManipulationEnd}
+            onSplit={handleSplit}
+            onDelete={handleDelete}
+            onRippleDelete={handleRippleDelete}
+            selectedClipIds={selectedClipIds}
+            onSelectionChange={setSelectedClipIds}
+            downloadedClipIds={downloadedClipIds}
+            totalDuration={totalDuration}
+          />
         </div>
       </section>
 
       {/* Hidden File Input for Import */}
-      <input 
-        type="file" 
-        ref={fileInputRef} 
-        onChange={handleFileChange} 
-        accept="video/*,audio/*,image/*" 
-        className="hidden" 
+      <input
+        type="file"
+        ref={fileInputRef}
+        onChange={handleFileChange}
+        accept="video/*,audio/*,image/*"
+        className="hidden"
       />
-    </div>
+    </div >
   );
 }

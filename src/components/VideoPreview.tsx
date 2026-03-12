@@ -14,9 +14,9 @@ export const VideoPreview: React.FC<VideoPreviewProps> = ({ clips, tracks, curre
   // Get active clips for each visible track
   const activeClips = useMemo(() => {
     const visibleTrackIds = tracks.filter(t => t.isVisible).map(t => t.id);
-    return clips.filter(clip => 
+    return clips.filter(clip =>
       visibleTrackIds.includes(clip.trackId) &&
-      currentTime >= clip.timelinePosition.start && 
+      currentTime >= clip.timelinePosition.start &&
       currentTime <= clip.timelinePosition.end
     );
   }, [clips, tracks, currentTime]);
@@ -31,7 +31,7 @@ export const VideoPreview: React.FC<VideoPreviewProps> = ({ clips, tracks, curre
 
       if (isActive && track && !track.isLocked) {
         const localTime = (currentTime - clip.timelinePosition.start) + clip.sourceStart;
-        
+
         if (Math.abs(video.currentTime - localTime) > 0.1) {
           video.currentTime = localTime;
         }
@@ -53,7 +53,7 @@ export const VideoPreview: React.FC<VideoPreviewProps> = ({ clips, tracks, curre
   }, [activeClips, currentTime, isPlaying, clips, tracks]);
 
   return (
-    <div className="relative w-full h-full bg-black rounded-xl overflow-hidden shadow-2xl border border-white/5">
+    <div className="relative aspect-video mx-auto h-full bg-black overflow-hidden shadow-2xl border border-white/5">
       {/* Video/Audio/Image Pool */}
       {clips.map((clip) => {
         const trackIndex = tracks.findIndex(t => t.id === clip.trackId);
@@ -68,9 +68,8 @@ export const VideoPreview: React.FC<VideoPreviewProps> = ({ clips, tracks, curre
               key={clip.id}
               ref={(el) => (videoRefs.current[clip.id] = el)}
               src={clip.videoUrl}
-              className={`absolute inset-0 w-full h-full object-contain transition-opacity duration-200 ${
-                isActive && clip.type === TrackType.VIDEO ? 'opacity-100' : 'opacity-0 pointer-events-none'
-              }`}
+              className={`absolute inset-0 w-full h-full object-cover transition-opacity duration-200 ${isActive && clip.type === TrackType.VIDEO ? 'opacity-100' : 'opacity-0 pointer-events-none'
+                }`}
               style={{ zIndex }}
               playsInline
             />
@@ -81,9 +80,8 @@ export const VideoPreview: React.FC<VideoPreviewProps> = ({ clips, tracks, curre
             <img
               key={clip.id}
               src={clip.thumbnailUrl}
-              className={`absolute inset-0 w-full h-full object-contain transition-opacity duration-200 ${
-                isActive ? 'opacity-100' : 'opacity-0 pointer-events-none'
-              }`}
+              className={`absolute inset-0 w-full h-full object-contain transition-opacity duration-200 ${isActive ? 'opacity-100' : 'opacity-0 pointer-events-none'
+                }`}
               style={{ zIndex }}
               referrerPolicy="no-referrer"
             />
@@ -91,12 +89,12 @@ export const VideoPreview: React.FC<VideoPreviewProps> = ({ clips, tracks, curre
         }
         if (clip.type === TrackType.TEXT || clip.type === TrackType.SUBTITLE) {
           if (!isActive) return null;
-          
+
           return (
-            <div 
+            <div
               key={clip.id}
               className="absolute inset-0 flex items-center justify-center pointer-events-none"
-              style={{ 
+              style={{
                 zIndex,
                 transform: `
                   translate(${clip.style?.position?.x || 0}px, ${clip.style?.position?.y || 0}px)
@@ -105,7 +103,7 @@ export const VideoPreview: React.FC<VideoPreviewProps> = ({ clips, tracks, curre
                 `
               }}
             >
-              <div 
+              <div
                 className={`px-4 py-2 rounded text-center ${clip.type === TrackType.SUBTITLE ? 'bg-black/60 mb-10' : ''}`}
                 style={{
                   fontSize: `${clip.style?.fontSize || 24}px`,

@@ -22,10 +22,10 @@ export const Recorder: React.FC<RecorderProps> = ({ onRecordingComplete, onStart
   const analyserRef = useRef<AnalyserNode | null>(null);
   const animationFrameRef = useRef<number | null>(null);
   const [audioLevel, setAudioLevel] = useState(0);
-  
+
   const onRecordingCompleteRef = useRef(onRecordingComplete);
   const onStartRecordingRef = useRef(onStartRecording);
-  
+
   useEffect(() => {
     onRecordingCompleteRef.current = onRecordingComplete;
     onStartRecordingRef.current = onStartRecording;
@@ -49,10 +49,10 @@ export const Recorder: React.FC<RecorderProps> = ({ onRecordingComplete, onStart
         const analyser = audioContext.createAnalyser();
         analyser.fftSize = 256;
         source.connect(analyser);
-        
+
         audioContextRef.current = audioContext;
         analyserRef.current = analyser;
-        
+
         const updateVisualizer = () => {
           if (analyserRef.current) {
             const dataArray = new Uint8Array(analyserRef.current.frequencyBinCount);
@@ -86,8 +86,8 @@ export const Recorder: React.FC<RecorderProps> = ({ onRecordingComplete, onStart
     if (!stream) return;
 
     const mimeType = 'video/mp4;codecs="avc1.640028"';
-    const options = MediaRecorder.isTypeSupported(mimeType) 
-      ? { mimeType } 
+    const options = MediaRecorder.isTypeSupported(mimeType)
+      ? { mimeType }
       : {}; // Fallback to default if specific codec not supported
 
     chunksRef.current = [];
@@ -113,9 +113,9 @@ export const Recorder: React.FC<RecorderProps> = ({ onRecordingComplete, onStart
     setRecordingTime(0);
     accumulatedTimeRef.current = 0;
     startTimeRef.current = Date.now();
-    
+
     if (onStartRecordingRef.current) onStartRecordingRef.current();
-    
+
     timerRef.current = window.setInterval(() => {
       const elapsed = (Date.now() - startTimeRef.current) / 1000;
       setRecordingTime(accumulatedTimeRef.current + elapsed);
@@ -150,7 +150,7 @@ export const Recorder: React.FC<RecorderProps> = ({ onRecordingComplete, onStart
       setIsPaused(false);
       setIsRecording(true);
       startTimeRef.current = Date.now();
-      
+
       timerRef.current = window.setInterval(() => {
         const elapsed = (Date.now() - startTimeRef.current) / 1000;
         setRecordingTime(accumulatedTimeRef.current + elapsed);
@@ -186,31 +186,31 @@ export const Recorder: React.FC<RecorderProps> = ({ onRecordingComplete, onStart
   };
 
   return (
-    <div className="w-full flex flex-col bg-[#111] overflow-hidden border border-white/10 shadow-2xl">
-      
+    <div className="relative w-full flex flex-col bg-[#111]  border-white/10 shadow-2xl">
+
 
       {/* Video Preview */}
-      <div className="relative aspect-video bg-black flex items-center justify-center">
-      {/* Header */}
-      <div className="absolute h-12 bg-none top-0 left-0 z-10 flex items-center justify-between px-4">
-        <div className="flex items-center space-x-2">
-          <div className={`w-2 h-2 rounded-full ${isRecording ? 'bg-red-500 animate-pulse' : 'bg-gray-500'}`} />
-          <span className="text-[10px] font-medium text-white uppercase tracking-wider">
-            {isRecording ? 'Recording' : 'Camera Preview'}
-          </span>
+      <div className="h-full w-full relative bg-black flex items-center justify-center">
+        {/* Header */}
+        <div className="absolute h-12 bg-none top-0 left-0 z-10 flex items-center justify-between px-4">
+          <div className="flex items-center space-x-2">
+            <div className={`w-2 h-2 rounded-full ${isRecording ? 'bg-red-500 animate-pulse' : 'bg-gray-500'}`} />
+            <span className="text-[10px] font-medium text-white uppercase tracking-wider">
+              {isRecording ? 'Recording' : 'Camera Preview'}
+            </span>
+          </div>
+          {onClose && (
+            <button onClick={onClose} className="p-1.5 hover:bg-white/10 rounded-full transition-colors">
+              <X size={16} />
+            </button>
+          )}
         </div>
-        {onClose && (
-          <button onClick={onClose} className="p-1.5 hover:bg-white/10 rounded-full transition-colors">
-            <X size={16} />
-          </button>
-        )}
-      </div> 
-        <video 
-          ref={videoRef} 
-          autoPlay 
-          muted 
-          playsInline 
-          className="w-full h-full object-cover"
+        <video
+          ref={videoRef}
+          autoPlay
+          muted
+          playsInline
+          className="object-cover aspect-video w-full"
         />
 
         {/* Audio Level Overlay */}
@@ -219,19 +219,18 @@ export const Recorder: React.FC<RecorderProps> = ({ onRecordingComplete, onStart
             const level = i / 10;
             const isActive = audioLevel > level;
             return (
-              <div 
-                key={i} 
-                className={`w-1.5 rounded-full transition-all duration-75 ${
-                  isActive 
-                    ? i > 7 ? 'bg-red-500' : i > 5 ? 'bg-yellow-500' : 'bg-emerald-500'
-                    : 'bg-white/10'
-                }`}
+              <div
+                key={i}
+                className={`w-1.5 rounded-full transition-all duration-75 ${isActive
+                  ? i > 7 ? 'bg-red-500' : i > 5 ? 'bg-yellow-500' : 'bg-emerald-500'
+                  : 'bg-white/10'
+                  }`}
                 style={{ height: isActive ? `${20 + audioLevel * 80}%` : '4px' }}
               />
             );
           })}
         </div>
-        
+
         {(isRecording || isPaused) && (
           <div className="absolute top-4 right-4 bg-black/60 px-2 py-1 rounded-md backdrop-blur-md border border-white/10">
             <span className="text-sm font-mono font-bold text-white tabular-nums">
@@ -242,29 +241,29 @@ export const Recorder: React.FC<RecorderProps> = ({ onRecordingComplete, onStart
       </div>
 
       {/* Controls */}
-      <div className="h-20 bg-[#111] flex items-center justify-center space-x-3 border-t border-white/5">
+      <div className="absolute bottom-2 right-2 h-10 bg-transparent flex items-center justify-center space-x-3 ">
         {!isRecording && !isPaused ? (
-          <button 
+          <button
             onClick={startRecording}
-            className="group flex items-center space-x-2 bg-red-600 hover:bg-red-700 text-white px-6 py-2.5 rounded-full transition-all hover:scale-105 shadow-lg shadow-red-600/20"
+            className="group flex items-center space-x-2 bg-red-600 opacity-70 hover:opacity-100 hover:bg-red-700 text-white px-3 py-1 rounded-full transition-all hover:scale-105 shadow-lg shadow-red-600/20"
           >
-            <Circle size={16} fill="currentColor" />
+            <Circle size={6} fill="currentColor" />
             <span className="text-xs font-bold uppercase tracking-tight">Start Recording</span>
           </button>
         ) : (
           <>
-            <button 
+            <button
               onClick={isPaused ? resumeRecording : pauseRecording}
-              className={`group flex items-center space-x-2 ${isPaused ? 'bg-blue-600 hover:bg-blue-700' : 'bg-white/10 hover:bg-white/20'} text-white px-6 py-2.5 rounded-full transition-all hover:scale-105 shadow-lg`}
+              className={`group flex items-center space-x-2 ${isPaused ? 'bg-blue-600 hover:bg-blue-700' : 'bg-white/10 hover:bg-white/20'} text-white px-3 py-1 rounded-full transition-all hover:scale-105 shadow-lg`}
             >
-              {isPaused ? <Circle size={16} fill="currentColor" /> : <div className="flex space-x-1"><div className="w-1 h-4 bg-white rounded-full" /><div className="w-1 h-4 bg-white rounded-full" /></div>}
+              {isPaused ? <Circle size={6} fill="currentColor" /> : <div className="flex space-x-1"><div className="w-1 h-4 bg-white rounded-full" /><div className="w-1 h-4 bg-white rounded-full" /></div>}
               <span className="text-xs font-bold uppercase tracking-tight">{isPaused ? 'Resume' : 'Pause'}</span>
             </button>
-            <button 
+            <button
               onClick={stopRecording}
-              className="group flex items-center space-x-2 bg-white text-black px-6 py-2.5 rounded-full transition-all hover:scale-105 shadow-lg"
+              className="group flex items-center space-x-2 bg-white text-black px-3 py-1 rounded-full transition-all hover:scale-105 shadow-lg"
             >
-              <Square size={16} fill="currentColor" />
+              <Square size={6} fill="currentColor" />
               <span className="text-xs font-bold uppercase tracking-tight">Stop</span>
             </button>
           </>
