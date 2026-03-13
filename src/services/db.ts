@@ -1,10 +1,11 @@
 import { VideoClip, VideoObjType } from "../types";
 
 const DB_NAME = "VideoEditorDB";
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 const CLIPS_STORE = "clips";
 const BLOBS_STORE = "blobs";
 const TRACKS_STORE = "tracks";
+const SETTINGS_STORE = "settings";
 
 export class VideoDB {
   private db: IDBDatabase | null = null;
@@ -23,6 +24,9 @@ export class VideoDB {
         }
         if (!db.objectStoreNames.contains(TRACKS_STORE)) {
           db.createObjectStore(TRACKS_STORE, { keyPath: "id" });
+        }
+        if (!db.objectStoreNames.contains(SETTINGS_STORE)) {
+          db.createObjectStore(SETTINGS_STORE);
         }
       };
 
@@ -208,13 +212,52 @@ export class VideoDB {
     }
   }
 
+  async saveSettings(key: string, value: any): Promise<void> {
+    const db = await this.ensureDB();
+    try {
+      const transaction = db.transaction(SETTINGS_STORE, "readwrite");
+      const store = transaction.objectStore(SETTINGS_STORE);
+      store.put(value, key);
+      return new Promise((resolve, reject) => {
+        transaction.oncomplete = () => resolve();
+        transaction.onerror = () => reject(transaction.error);
+      });
+    } catch (err: any) {
+      if (err.name === "InvalidStateError" || err.message?.includes("closing")) {
+        this.db = null;
+        return this.saveSettings(key, value);
+      }
+      throw err;
+    }
+  }
+
+  async getSettings(key: string): Promise<any> {
+    const db = await this.ensureDB();
+    try {
+      return new Promise((resolve, reject) => {
+        const transaction = db.transaction(SETTINGS_STORE, "readonly");
+        const store = transaction.objectStore(SETTINGS_STORE);
+        const request = store.get(key);
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+      });
+    } catch (err: any) {
+      if (err.name === "InvalidStateError" || err.message?.includes("closing")) {
+        this.db = null;
+        return this.getSettings(key);
+      }
+      throw err;
+    }
+  }
+
   async clearAll(): Promise<void> {
     const db = await this.ensureDB();
     try {
-      const transaction = db.transaction([CLIPS_STORE, BLOBS_STORE, TRACKS_STORE], "readwrite");
+      const transaction = db.transaction([CLIPS_STORE, BLOBS_STORE, TRACKS_STORE, SETTINGS_STORE], "readwrite");
       transaction.objectStore(CLIPS_STORE).clear();
       transaction.objectStore(BLOBS_STORE).clear();
       transaction.objectStore(TRACKS_STORE).clear();
+      transaction.objectStore(SETTINGS_STORE).clear();
 
       return new Promise((resolve, reject) => {
         transaction.oncomplete = () => resolve();

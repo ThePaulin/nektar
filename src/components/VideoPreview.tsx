@@ -1,4 +1,4 @@
-import React, { useRef, useEffect, useMemo } from 'react';
+import React, { useRef, useEffect, useMemo, useState } from 'react';
 import { VideoObjType, VideoClip, Track, TrackType } from '../types';
 
 interface VideoPreviewProps {
@@ -10,6 +10,25 @@ interface VideoPreviewProps {
 
 export const VideoPreview: React.FC<VideoPreviewProps> = ({ clips, tracks, currentTime, isPlaying }) => {
   const videoRefs = useRef<{ [key: number]: HTMLVideoElement | null }>({});
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [containerWidth, setContainerWidth] = useState(1280);
+
+  // Reference width for scaling (matches export resolution)
+  const REFERENCE_WIDTH = 1280;
+  const scaleFactor = containerWidth / REFERENCE_WIDTH;
+
+  useEffect(() => {
+    if (!containerRef.current) return;
+    const observer = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        if (entry.contentRect.width > 0) {
+          setContainerWidth(entry.contentRect.width);
+        }
+      }
+    });
+    observer.observe(containerRef.current);
+    return () => observer.disconnect();
+  }, []);
 
   // Get active clips for each visible track
   const activeClips = useMemo(() => {
@@ -53,7 +72,10 @@ export const VideoPreview: React.FC<VideoPreviewProps> = ({ clips, tracks, curre
   }, [activeClips, currentTime, isPlaying, clips, tracks]);
 
   return (
-    <div className="relative aspect-video mx-auto h-full bg-black overflow-hidden shadow-2xl border border-white/5">
+    <div 
+      ref={containerRef}
+      className="relative aspect-video mx-auto h-full bg-black overflow-hidden shadow-2xl border border-white/5"
+    >
       {/* Video/Audio/Image Pool */}
       {clips.map((clip) => {
         const trackIndex = tracks.findIndex(t => t.id === clip.trackId);
@@ -90,6 +112,11 @@ export const VideoPreview: React.FC<VideoPreviewProps> = ({ clips, tracks, curre
         if (clip.type === TrackType.TEXT || clip.type === TrackType.SUBTITLE) {
           if (!isActive) return null;
 
+          const posX = (clip.style?.position?.x || 0) * scaleFactor;
+          const posY = (clip.style?.position?.y || 0) * scaleFactor;
+          const baseFontSize = clip.style?.fontSize || 48;
+          const scaledFontSize = baseFontSize * scaleFactor;
+
           return (
             <div
               key={clip.id}
@@ -97,16 +124,16 @@ export const VideoPreview: React.FC<VideoPreviewProps> = ({ clips, tracks, curre
               style={{
                 zIndex,
                 transform: `
-                  translate(${clip.style?.position?.x || 0}px, ${clip.style?.position?.y || 0}px)
+                  translate(${posX}px, ${posY}px)
                   scale(${clip.style?.scale || 1})
                   rotate(${clip.style?.rotation || 0}deg)
                 `
               }}
             >
               <div
-                className={`px-4 py-2 rounded text-center ${clip.type === TrackType.SUBTITLE ? 'bg-black/60 mb-10' : ''}`}
+                className={`px-4 py-2 rounded text-center ${clip.type === TrackType.SUBTITLE ? 'bg-black/60' : ''}`}
                 style={{
-                  fontSize: `${clip.style?.fontSize || 24}px`,
+                  fontSize: `${scaledFontSize}px`,
                   fontWeight: clip.style?.fontWeight || 'normal',
                   fontStyle: clip.style?.fontStyle || 'normal',
                   fontStretch: clip.style?.fontStretch || 'normal',
@@ -114,6 +141,9 @@ export const VideoPreview: React.FC<VideoPreviewProps> = ({ clips, tracks, curre
                   fontFamily: clip.style?.fontFamily || 'sans-serif',
                   color: clip.style?.color || '#ffffff',
                   backgroundColor: clip.style?.backgroundColor || 'transparent',
+                  padding: `${8 * scaleFactor}px ${16 * scaleFactor}px`,
+                  borderRadius: `${4 * scaleFactor}px`,
+                  marginBottom: clip.type === TrackType.SUBTITLE ? `${40 * scaleFactor}px` : undefined,
                 }}
               >
                 {clip.content}

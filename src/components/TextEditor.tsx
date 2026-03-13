@@ -122,13 +122,13 @@ export const TextEditor: React.FC<TextEditorProps> = ({ clip, onUpdate }) => {
             <div className="space-y-2">
               <div className="flex justify-between items-center">
                 <span className="text-[10px] text-gray-400">Size</span>
-                <span className="text-[10px] font-mono text-blue-400">{clip.style?.fontSize || 24}px</span>
+                <span className="text-[10px] font-mono text-blue-400">{clip.style?.fontSize || 48}px</span>
               </div>
               <input
                 type="range"
                 min="8"
                 max="200"
-                value={clip.style?.fontSize || 24}
+                value={clip.style?.fontSize || 48}
                 onChange={(e) => handleStyleChange({ fontSize: parseInt(e.target.value) })}
                 className="w-full accent-blue-600"
               />

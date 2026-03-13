@@ -35,8 +35,13 @@ interface TimelineProps {
   onTrackMove: (id: string, direction: 'up' | 'down') => void;
   onAddTrack: (type: TrackType) => void;
   onAddTextClip?: (type: TrackType.TEXT | TrackType.SUBTITLE, startTime?: number) => void;
-  initialPixelsPerSecond?: number;
+  pixelsPerSecond: number;
+  onPixelsPerSecondChange: (value: number) => void;
+  trackHeightMode: TrackHeightMode;
+  onTrackHeightModeChange: (mode: TrackHeightMode) => void;
   totalDuration?: number;
+  exportRange: { start: number; end: number };
+  onExportRangeChange: (range: { start: number; end: number }) => void;
 }
 
 const TRACK_HEADER_WIDTH = 200;
@@ -48,6 +53,11 @@ const TRACK_HEIGHTS: Record<TrackHeightMode, number> = {
   md: 80,
   lg: 120
 };
+
+const FPS = 30;
+const FRAME_DURATION = 1 / FPS;
+
+const snapToFrame = (time: number) => Math.round(time * FPS) / FPS;
 
 export const Timeline: React.FC<TimelineProps> = ({
   clips,
@@ -76,24 +86,30 @@ export const Timeline: React.FC<TimelineProps> = ({
   onAddTextClip,
   onClipContentUpdate,
   onClipUpdate,
-  initialPixelsPerSecond = 40,
+  pixelsPerSecond,
+  onPixelsPerSecondChange,
+  trackHeightMode,
+  onTrackHeightModeChange,
   totalDuration = 60,
+  exportRange,
+  onExportRangeChange,
 }) => {
   const tracksScrollRef = useRef<HTMLDivElement>(null);
   const headerScrollRef = useRef<HTMLDivElement>(null);
   const timelineRootRef = useRef<HTMLDivElement>(null);
   const [isDraggingPlayhead, setIsDraggingPlayhead] = useState(false);
+  const [draggingExportMarker, setDraggingExportMarker] = useState<'start' | 'end' | null>(null);
   const [draggingClipId, setDraggingClipId] = useState<number | null>(null);
   const [trimmingClipId, setTrimmingClipId] = useState<{ id: number; side: 'left' | 'right' } | null>(null);
   const [dragOffset, setDragOffset] = useState(0);
-  const [pixelsPerSecond, setPixelsPerSecond] = useState(initialPixelsPerSecond);
   const [editingClipId, setEditingClipId] = useState<number | null>(null);
+  const [editingTrackId, setEditingTrackId] = useState<string | null>(null);
   const [editValue, setEditValue] = useState('');
+  const [trackEditValue, setTrackEditValue] = useState('');
   const [snappedPoint, setSnappedPoint] = useState<number | null>(null);
   const [initialDragPositions, setInitialDragPositions] = useState<{ [id: number]: { start: number; trackId: string } }>({});
   const [selectionRect, setSelectionRect] = useState<{ startX: number; startY: number; endX: number; endY: number } | null>(null);
   const [isSelecting, setIsSelecting] = useState(false);
-  const [trackHeightMode, setTrackHeightMode] = useState<TrackHeightMode>('md');
   const trackHeight = TRACK_HEIGHTS[trackHeightMode];
   const [hasDragged, setHasDragged] = useState(false);
   const selectionStartRef = useRef<{ x: number; y: number } | null>(null);
@@ -137,11 +153,8 @@ export const Timeline: React.FC<TimelineProps> = ({
   const formatTime = (seconds: number) => {
     const mins = Math.floor(seconds / 60);
     const secs = Math.floor(seconds % 60);
-    const ms = Math.floor((seconds % 1) * 10);
-    if (pixelsPerSecond > 100) {
-      return `${mins}:${secs.toString().padStart(2, '0')}.${ms}`;
-    }
-    return `${mins}:${secs.toString().padStart(2, '0')}`;
+    const frames = Math.floor(Math.round((seconds % 1) * FPS));
+    return `${mins}:${secs.toString().padStart(2, '0')}:${frames.toString().padStart(2, '0')}`;
   };
 
   const handlePlayheadDrag = (e: MouseEvent | TouchEvent) => {
@@ -149,7 +162,7 @@ export const Timeline: React.FC<TimelineProps> = ({
       const rect = tracksScrollRef.current.getBoundingClientRect();
       const clientX = 'touches' in e ? e.touches[0].clientX : e.clientX;
       const x = clientX - rect.left + tracksScrollRef.current.scrollLeft;
-      let newTime = Math.max(0, Math.min(totalDuration, x / pixelsPerSecond));
+      let newTime = snapToFrame(Math.max(0, Math.min(totalDuration, x / pixelsPerSecond)));
 
       const snapPoints = [0, totalDuration, ...clips.flatMap(c => [c.timelinePosition.start, c.timelinePosition.end])];
       let foundSnap = false;
@@ -167,6 +180,21 @@ export const Timeline: React.FC<TimelineProps> = ({
     }
   };
 
+  const handleExportMarkerDrag = (e: MouseEvent | TouchEvent) => {
+    if (draggingExportMarker && tracksScrollRef.current) {
+      const rect = tracksScrollRef.current.getBoundingClientRect();
+      const clientX = 'touches' in e ? e.touches[0].clientX : e.clientX;
+      const x = clientX - rect.left + tracksScrollRef.current.scrollLeft;
+      let newTime = snapToFrame(Math.max(0, Math.min(totalDuration, x / pixelsPerSecond)));
+
+      if (draggingExportMarker === 'start') {
+        onExportRangeChange({ ...exportRange, start: Math.min(newTime, exportRange.end) });
+      } else {
+        onExportRangeChange({ ...exportRange, end: Math.max(newTime, exportRange.start) });
+      }
+    }
+  };
+
   const handleClipDrag = (e: MouseEvent | TouchEvent) => {
     if (draggingClipId !== null && tracksScrollRef.current && onClipsUpdate) {
       const anchorInitial = initialDragPositions[draggingClipId];
@@ -180,7 +208,7 @@ export const Timeline: React.FC<TimelineProps> = ({
       const x = clientX - rect.left + tracksScrollRef.current.scrollLeft;
       const y = clientY - rect.top;
 
-      let newAnchorStart = (x - dragOffset) / pixelsPerSecond;
+      let newAnchorStart = snapToFrame((x - dragOffset) / pixelsPerSecond);
       if (isNaN(newAnchorStart)) return;
 
       // Snapping logic
@@ -245,7 +273,7 @@ export const Timeline: React.FC<TimelineProps> = ({
       const rect = tracksScrollRef.current.getBoundingClientRect();
       const clientX = 'touches' in e ? e.touches[0].clientX : e.clientX;
       const x = clientX - rect.left + tracksScrollRef.current.scrollLeft;
-      let newTime = x / pixelsPerSecond;
+      let newTime = snapToFrame(x / pixelsPerSecond);
 
       const snapPoints = [0, currentTime, ...clips.flatMap(c => c.id !== trimmingClipId.id ? [c.timelinePosition.start, c.timelinePosition.end] : [])];
       let foundSnap = false;
@@ -353,6 +381,10 @@ export const Timeline: React.FC<TimelineProps> = ({
       setSnappedPoint(null);
     };
 
+    const onExportMarkerMouseUp = () => {
+      setDraggingExportMarker(null);
+    };
+
     const onClipMouseUp = () => {
       if (!hasDragged && draggingClipId !== null && onSelectionChange) {
         onSelectionChange([draggingClipId]);
@@ -373,6 +405,10 @@ export const Timeline: React.FC<TimelineProps> = ({
       window.addEventListener('mousemove', handlePlayheadDrag);
       window.addEventListener('mouseup', onPlayheadMouseUp);
     }
+    if (draggingExportMarker) {
+      window.addEventListener('mousemove', handleExportMarkerDrag);
+      window.addEventListener('mouseup', onExportMarkerMouseUp);
+    }
     if (draggingClipId !== null) {
       window.addEventListener('mousemove', handleClipDrag);
       window.addEventListener('mouseup', onClipMouseUp);
@@ -384,6 +420,8 @@ export const Timeline: React.FC<TimelineProps> = ({
     return () => {
       window.removeEventListener('mousemove', handlePlayheadDrag);
       window.removeEventListener('mouseup', onPlayheadMouseUp);
+      window.removeEventListener('mousemove', handleExportMarkerDrag);
+      window.removeEventListener('mouseup', onExportMarkerMouseUp);
       window.removeEventListener('mousemove', handleClipDrag);
       window.removeEventListener('mouseup', onClipMouseUp);
       window.removeEventListener('mousemove', handleTrimDrag);
@@ -407,14 +445,26 @@ export const Timeline: React.FC<TimelineProps> = ({
 
   const handleZoom = (newZoom: number) => {
     const clampedZoom = Math.max(5, Math.min(500, newZoom));
-    setPixelsPerSecond(clampedZoom);
+    onPixelsPerSecondChange(clampedZoom);
   };
 
   const handleRulerMouseDown = (e: React.MouseEvent) => {
     if (headerScrollRef.current) {
       const rect = headerScrollRef.current.getBoundingClientRect();
       const x = e.clientX - rect.left + headerScrollRef.current.scrollLeft;
-      let newTime = Math.max(0, Math.min(totalDuration, x / pixelsPerSecond));
+      let newTime = snapToFrame(Math.max(0, Math.min(totalDuration, x / pixelsPerSecond)));
+
+      // Handle Command/Ctrl + Click for Start Marker
+      if (e.metaKey || e.ctrlKey) {
+        onExportRangeChange({ ...exportRange, start: Math.min(newTime, exportRange.end) });
+        return;
+      }
+
+      // Handle Alt + Click for End Marker
+      if (e.altKey) {
+        onExportRangeChange({ ...exportRange, end: Math.max(newTime, exportRange.start) });
+        return;
+      }
 
       // Snapping logic
       const snapPoints = [0, totalDuration, ...clips.flatMap(c => [c.timelinePosition.start, c.timelinePosition.end])];
@@ -440,7 +490,8 @@ export const Timeline: React.FC<TimelineProps> = ({
       const x = e.clientX - rect.left + tracksScrollRef.current.scrollLeft;
       const y = e.clientY - rect.top;
 
-      onTimeChange(Math.max(0, Math.min(totalDuration, x / pixelsPerSecond)));
+      const snappedTime = snapToFrame(Math.max(0, Math.min(totalDuration, x / pixelsPerSecond)));
+      onTimeChange(snappedTime);
 
       setIsSelecting(true);
       selectionStartRef.current = { x, y };
@@ -488,6 +539,18 @@ export const Timeline: React.FC<TimelineProps> = ({
     setEditingClipId(null);
   };
 
+  const startEditingTrack = (track: Track) => {
+    setEditingTrackId(track.id);
+    setTrackEditValue(track.name);
+  };
+
+  const saveTrackEdit = (trackId: string) => {
+    if (trackEditValue.trim()) {
+      onTrackUpdate(trackId, { name: trackEditValue.trim() });
+    }
+    setEditingTrackId(null);
+  };
+
   return (
     <div
       ref={timelineRootRef}
@@ -505,6 +568,14 @@ export const Timeline: React.FC<TimelineProps> = ({
           onMouseDown={handleRulerMouseDown}
         >
           <div style={{ width: totalDuration * pixelsPerSecond + 100 }} className="h-full relative">
+            {/* Export Range Highlight */}
+            <div
+              className="absolute top-0 bottom-0 bg-blue-500/10 pointer-events-none"
+              style={{
+                left: exportRange.start * pixelsPerSecond,
+                width: (exportRange.end - exportRange.start) * pixelsPerSecond
+              }}
+            />
             {ticks.map((tick) => (
               <div
                 key={tick}
@@ -517,6 +588,32 @@ export const Timeline: React.FC<TimelineProps> = ({
                 <div className="w-px h-2 bg-gray-300" />
               </div>
             ))}
+
+            {/* Export Start Marker */}
+            <div
+              className="absolute top-0 h-full z-[90] flex flex-col items-center"
+              style={{ left: exportRange.start * pixelsPerSecond }}
+              onMouseDown={(e) => {
+                e.stopPropagation();
+                setDraggingExportMarker('start');
+              }}
+            >
+              <div className="w-3 h-3 bg-blue-500 rotate-45 -translate-x-1/2 mt-1 cursor-col-resize shadow-sm" />
+              <div className="w-px h-full bg-blue-500/30" />
+            </div>
+
+            {/* Export End Marker */}
+            <div
+              className="absolute top-0 h-full z-[90] flex flex-col items-center"
+              style={{ left: exportRange.end * pixelsPerSecond }}
+              onMouseDown={(e) => {
+                e.stopPropagation();
+                setDraggingExportMarker('end');
+              }}
+            >
+              <div className="w-3 h-3 bg-blue-500 rotate-45 -translate-x-1/2 mt-1 cursor-col-resize shadow-sm" />
+              <div className="w-px h-full bg-blue-500/30" />
+            </div>
           </div>
         </div>
       </div>
@@ -537,9 +634,38 @@ export const Timeline: React.FC<TimelineProps> = ({
                 onClick={() => onTrackSelect(track.id)}
               >
                 <div className="flex items-center justify-between">
-                  <span className={`text-xs font-medium truncate ${selectedTrackId === track.id ? 'text-blue-600' : 'text-gray-700'}`}>
-                    {track.name}
-                  </span>
+                  {editingTrackId === track.id ? (
+                    <input
+                      autoFocus
+                      className="bg-white/10 border-none outline-none text-xs font-medium text-blue-600 w-full rounded px-1"
+                      value={trackEditValue}
+                      onChange={(e) => setTrackEditValue(e.target.value)}
+                      onBlur={() => saveTrackEdit(track.id)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          saveTrackEdit(track.id);
+                        }
+                        if (e.key === 'Escape') {
+                          setEditingTrackId(null);
+                        }
+                      }}
+                      onClick={(e) => e.stopPropagation()}
+                    />
+                  ) : (
+                    <span
+                      className={`text-xs font-medium truncate cursor-text hover:text-blue-500 transition-colors ${selectedTrackId === track.id ? 'text-blue-600' : 'text-gray-700'}`}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        if (selectedTrackId === track.id) {
+                          startEditingTrack(track);
+                        } else {
+                          onTrackSelect(track.id);
+                        }
+                      }}
+                    >
+                      {track.name}
+                    </span>
+                  )}
                   <div className={`flex items-center space-x-1 ${trackHeightMode === 'sm' ? 'scale-90 origin-right' : ''}`}>
                     <button
                       onClick={(e) => { e.stopPropagation(); onTrackUpdate(track.id, { isVisible: !track.isVisible }); }}
@@ -904,7 +1030,7 @@ export const Timeline: React.FC<TimelineProps> = ({
               {(['sm', 'md', 'lg'] as TrackHeightMode[]).map((mode) => (
                 <button
                   key={mode}
-                  onClick={() => setTrackHeightMode(mode)}
+                  onClick={() => onTrackHeightModeChange(mode)}
                   className={`px-2 py-1 text-[10px] font-bold uppercase rounded transition-all ${trackHeightMode === mode
                     ? 'bg-white text-blue-600 shadow-sm'
                     : 'text-gray-400 hover:text-gray-600'

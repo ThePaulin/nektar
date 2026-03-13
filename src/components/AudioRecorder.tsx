@@ -5,9 +5,10 @@ interface AudioRecorderProps {
   onRecordingComplete: (audioUrl: string, duration: number, blob: Blob) => void;
   onStartRecording?: () => void;
   onClose?: () => void;
+  isActive?: boolean;
 }
 
-export const AudioRecorder: React.FC<AudioRecorderProps> = ({ onRecordingComplete, onStartRecording, onClose }) => {
+export const AudioRecorder: React.FC<AudioRecorderProps> = ({ onRecordingComplete, onStartRecording, onClose, isActive = true }) => {
   const [isRecording, setIsRecording] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
   const [stream, setStream] = useState<MediaStream | null>(null);
@@ -157,6 +158,7 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({ onRecordingComplet
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      if (!isActive) return;
       const key = e.key.toLowerCase();
       if (key === 'r') {
         e.preventDefault();
@@ -174,7 +176,7 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({ onRecordingComplet
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isRecording, isPaused, stream]);
+  }, [isRecording, isPaused, stream, isActive]);
 
   const formatDuration = (seconds: number) => {
     const mins = Math.floor(seconds / 60);

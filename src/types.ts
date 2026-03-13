@@ -45,6 +45,7 @@ export interface Track {
   isVisible: boolean;
   isLocked: boolean;
   isMuted: boolean;
+  order: number;
 }
 
 export type VideoObjType = VideoClip[];

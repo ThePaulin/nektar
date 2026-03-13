@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback, ChangeEvent } from 'react';
 import JSZip from 'jszip';
 import { Timeline } from './components/Timeline';
 import { VideoPreview } from './components/VideoPreview';
+import { ExportDialog } from './components/ExportDialog';
 import { Recorder } from './components/Recorder';
 import { AudioRecorder } from './components/AudioRecorder';
 import { TextEditor } from './components/TextEditor';
@@ -17,8 +18,8 @@ const TIMELINE_MAX_HEIGHT: number = 623;
 const TIMELINE_MIN_HEIGHT: number = 315;
 
 const INITIAL_TRACKS: Track[] = [
-  { id: 'track-1', name: 'Video 1', type: TrackType.VIDEO, isVisible: true, isLocked: false, isMuted: false },
-  { id: 'track-2', name: 'Audio 1', type: TrackType.AUDIO, isVisible: true, isLocked: false, isMuted: false },
+  { id: 'track-1', name: 'Video 1', type: TrackType.VIDEO, isVisible: true, isLocked: false, isMuted: false, order: 0 },
+  { id: 'track-2', name: 'Audio 1', type: TrackType.AUDIO, isVisible: true, isLocked: false, isMuted: false, order: 1 },
 ];
 
 const MOCK_CLIPS: VideoObjType = [
@@ -60,6 +61,7 @@ export default function App() {
   const [recordingStartTime, setRecordingStartTime] = useState(0);
   const [recordingMode, setRecordingMode] = useState<RecordingMode>('insert');
   const [isExportMenuOpen, setIsExportMenuOpen] = useState(false);
+  const [isExporting, setIsExporting] = useState(false);
   const [timelineHeight, setTimelineHeight] = useState(500);
   const [isResizing, setIsResizing] = useState(false);
   const [showRestorePrompt, setShowRestorePrompt] = useState(false);
@@ -75,10 +77,18 @@ export default function App() {
   const [loadingMessage, setLoadingMessage] = useState('');
 
   const [currentTime, setCurrentTime] = useState(0);
+  const [pixelsPerSecond, setPixelsPerSecond] = useState(40);
+  const [trackHeightMode, setTrackHeightMode] = useState<'sm' | 'md' | 'lg'>('md');
+  const [exportRange, setExportRange] = useState<{ start: number; end: number }>({ start: 0, end: 60 });
+  const [totalDuration, setTotalDuration] = useState(60);
   const [isPlaying, setIsPlaying] = useState(false);
   const playbackRef = useRef<number | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const totalDuration = 60;
+
+  useEffect(() => {
+    const maxEnd = Math.max(60, ...clips.map(c => c.timelinePosition.end));
+    setTotalDuration(Math.round(maxEnd * 30) / 30);
+  }, [clips]);
 
   useEffect(() => {
     const checkDB = async () => {
@@ -109,7 +119,15 @@ export default function App() {
         try {
           await Promise.all([
             videoDB.saveAllClips(clips),
-            videoDB.saveTracks(tracks)
+            videoDB.saveTracks(tracks),
+            videoDB.saveSettings('currentTime', currentTime),
+            videoDB.saveSettings('exportRange', exportRange),
+            videoDB.saveSettings('downloadedClipIds', downloadedClipIds),
+            videoDB.saveSettings('timelineHeight', timelineHeight),
+            videoDB.saveSettings('selectedTrackId', selectedTrackId),
+            videoDB.saveSettings('recordingMode', recordingMode),
+            videoDB.saveSettings('pixelsPerSecond', pixelsPerSecond),
+            videoDB.saveSettings('trackHeightMode', trackHeightMode),
           ]);
         } catch (err: any) {
           console.error("Failed to sync metadata to IndexedDB:", err);
@@ -120,7 +138,7 @@ export default function App() {
       }
     };
     syncMetadata();
-  }, [clips, tracks, isInitialized]);
+  }, [clips, tracks, currentTime, exportRange, downloadedClipIds, timelineHeight, selectedTrackId, recordingMode, pixelsPerSecond, trackHeightMode, isInitialized]);
 
   const handleRestore = async () => {
     if (!pendingRestoredClips) return;
@@ -145,9 +163,31 @@ export default function App() {
       }));
 
       if (pendingRestoredTracks) {
-        setTracks(pendingRestoredTracks);
+        setTracks(pendingRestoredTracks.sort((a, b) => a.order - b.order));
       }
       setClips(restoredClips);
+
+      // Restore settings
+      const [restoredTime, restoredRange, restoredDownloads, restoredHeight, restoredTrackId, restoredRecMode, restoredPixelsPerSecond, restoredTrackHeightMode] = await Promise.all([
+        videoDB.getSettings('currentTime'),
+        videoDB.getSettings('exportRange'),
+        videoDB.getSettings('downloadedClipIds'),
+        videoDB.getSettings('timelineHeight'),
+        videoDB.getSettings('selectedTrackId'),
+        videoDB.getSettings('recordingMode'),
+        videoDB.getSettings('pixelsPerSecond'),
+        videoDB.getSettings('trackHeightMode'),
+      ]);
+
+      if (restoredTime !== undefined) setCurrentTime(restoredTime);
+      if (restoredRange !== undefined) setExportRange(restoredRange);
+      if (restoredDownloads !== undefined) setDownloadedClipIds(restoredDownloads);
+      if (restoredHeight !== undefined) setTimelineHeight(restoredHeight);
+      if (restoredTrackId !== undefined) setSelectedTrackId(restoredTrackId);
+      if (restoredRecMode !== undefined) setRecordingMode(restoredRecMode);
+      if (restoredPixelsPerSecond !== undefined) setPixelsPerSecond(restoredPixelsPerSecond);
+      if (restoredTrackHeightMode !== undefined) setTrackHeightMode(restoredTrackHeightMode);
+
       setPast([]);
       setFuture([]);
       setShowRestorePrompt(false);
@@ -167,6 +207,15 @@ export default function App() {
     try {
       await videoDB.clearAll();
       setClips(MOCK_CLIPS);
+      setTracks(INITIAL_TRACKS);
+      setCurrentTime(0);
+      setExportRange({ start: 0, end: 60 });
+      setDownloadedClipIds([]);
+      setTimelineHeight(500);
+      setSelectedTrackId(INITIAL_TRACKS[0].id);
+      setRecordingMode('insert');
+      setPixelsPerSecond(40);
+      setTrackHeightMode('md');
       setPast([]);
       setFuture([]);
       setShowRestorePrompt(false);
@@ -309,10 +358,10 @@ export default function App() {
       const tick = () => {
         const elapsed = (Date.now() - startTime) / 1000;
         if (elapsed >= totalDuration) {
-          setCurrentTime(totalDuration);
+          setCurrentTime(Math.round(totalDuration * 30) / 30);
           setIsPlaying(false);
         } else {
-          setCurrentTime(elapsed);
+          setCurrentTime(Math.round(elapsed * 30) / 30);
           playbackRef.current = requestAnimationFrame(tick);
         }
       };
@@ -512,6 +561,7 @@ export default function App() {
       isVisible: true,
       isLocked: false,
       isMuted: false,
+      order: tracks.length,
     };
     setTracks([...tracks, newTrack]);
     setSelectedTrackId(newTrack.id);
@@ -519,10 +569,14 @@ export default function App() {
 
   const handleDeleteTrack = (trackId: string) => {
     if (tracks.length <= 1) return;
-    setTracks(tracks.filter(t => t.id !== trackId));
+    const remainingTracks = tracks.filter(t => t.id !== trackId).map((t, i) => ({
+      ...t,
+      order: i
+    }));
+    setTracks(remainingTracks);
     setClips(clips.filter(c => c.trackId !== trackId));
     if (selectedTrackId === trackId) {
-      setSelectedTrackId(tracks.find(t => t.id !== trackId)?.id || '');
+      setSelectedTrackId(remainingTracks[0]?.id || '');
     }
   };
 
@@ -535,6 +589,7 @@ export default function App() {
       ...trackToDup,
       id: newTrackId,
       name: `${trackToDup.name} (Copy)`,
+      order: tracks.length,
     };
 
     const newClips = clips
@@ -576,7 +631,7 @@ export default function App() {
         end: actualStartTime + 5,
       },
       style: {
-        fontSize: 24,
+        fontSize: 48,
         color: '#ffffff',
         backgroundColor: 'transparent',
       }
@@ -818,7 +873,14 @@ export default function App() {
       const temp = newTracks[index];
       newTracks[index] = newTracks[targetIndex];
       newTracks[targetIndex] = temp;
-      setTracks(newTracks);
+      
+      // Update order property for all tracks based on their new positions
+      const orderedTracks = newTracks.map((track, i) => ({
+        ...track,
+        order: i
+      }));
+      
+      setTracks(orderedTracks);
     }
   };
 
@@ -900,9 +962,8 @@ export default function App() {
   };
 
   const handleExportSingle = () => {
-    // The track hierarchy (top tracks rendered over bottom tracks) is now fully supported in the preview.
-    // A single video export would follow this same layering logic using a canvas-based compositor or FFmpeg.
-    alert("Single video file export with track layering is currently in development. The preview already correctly reflects your track hierarchy (top tracks appear above bottom tracks)!");
+    console.log(`[App] Opening export dialog with range: ${exportRange.start}s to ${exportRange.end}s`);
+    setIsExporting(true);
     setIsExportMenuOpen(false);
   };
 
@@ -931,14 +992,17 @@ export default function App() {
         setSelectedClipIds(clips.map(c => c.id));
       }
 
+      const selectedTrack = tracks.find(t => t.id === selectedTrackId);
+      const isAudioOrVideoTrack = selectedTrack?.type === TrackType.AUDIO || selectedTrack?.type === TrackType.VIDEO;
+
       // Alt + I: Insert Mode
-      if (key === 'i' && isShift) {
+      if (key === 'i' && isShift && isAudioOrVideoTrack) {
         e.preventDefault();
         setRecordingMode('insert');
       }
 
       // Alt + A: Append Mode
-      if (key === 'a' && isShift) {
+      if (key === 'a' && isShift && isAudioOrVideoTrack) {
         e.preventDefault();
         setRecordingMode('append');
       }
@@ -1043,6 +1107,8 @@ export default function App() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [
     clips,
+    tracks,
+    selectedTrackId,
     currentTime,
     recordingMode,
     selectedClipIds,
@@ -1257,7 +1323,7 @@ export default function App() {
                 >
                   <FileVideo size={16} className="text-emerald-400" />
                   <div className="flex flex-col">
-                    <span className="font-medium">Single Video File (.mp4)</span>
+                    <span className="font-medium">Single Video File (mp4/webm)</span>
                     <span className="text-[10px] text-gray-500">Combined timeline sequence</span>
                   </div>
                 </button>
@@ -1304,6 +1370,7 @@ export default function App() {
                 <AudioRecorder
                   onRecordingComplete={handleRecordingComplete}
                   onStartRecording={handleStartRecording}
+                  isActive={tracks.find(t => t.id === selectedTrackId)?.type === TrackType.AUDIO}
                 />
               </div>
             ) : null}
@@ -1313,6 +1380,7 @@ export default function App() {
                 <Recorder
                   onRecordingComplete={handleRecordingComplete}
                   onStartRecording={handleStartRecording}
+                  isActive={tracks.find(t => t.id === selectedTrackId)?.type === TrackType.VIDEO || (selectedClipIds.length === 1 && clips.find(c => c.id === selectedClipIds[0])?.type === TrackType.VIDEO)}
                 />
               </div>
             </div>
@@ -1403,9 +1471,25 @@ export default function App() {
             onSelectionChange={setSelectedClipIds}
             downloadedClipIds={downloadedClipIds}
             totalDuration={totalDuration}
+            exportRange={exportRange}
+            onExportRangeChange={setExportRange}
+            pixelsPerSecond={pixelsPerSecond}
+            onPixelsPerSecondChange={setPixelsPerSecond}
+            trackHeightMode={trackHeightMode}
+            onTrackHeightModeChange={setTrackHeightMode}
           />
         </div>
       </section>
+
+      {isExporting && (
+        <ExportDialog
+          clips={clips}
+          tracks={tracks}
+          totalDuration={totalDuration}
+          exportRange={exportRange}
+          onClose={() => setIsExporting(false)}
+        />
+      )}
 
       {/* Hidden File Input for Import */}
       <input
