@@ -3,7 +3,7 @@ import { motion } from 'motion/react';
 import {
   Plus, Scissors, Trash2, ZoomIn, ZoomOut, Download, CheckCircle2,
   Eye, EyeOff, Lock, Unlock, Volume2, VolumeX, MoreVertical, Copy, Trash,
-  ChevronUp, ChevronDown
+  ChevronUp, ChevronDown, Radio
 } from 'lucide-react';
 import { VideoClip, VideoObjType, Track, TrackType } from '../types';
 import { ThumbnailStrip } from './ThumbnailStrip';
@@ -679,6 +679,15 @@ export const Timeline: React.FC<TimelineProps> = ({
                     >
                       {track.isLocked ? <Lock size={12} /> : <Unlock size={12} />}
                     </button>
+                    {(track.type === TrackType.VIDEO || track.type === TrackType.AUDIO) && (
+                      <button
+                        onClick={(e) => { e.stopPropagation(); onTrackUpdate(track.id, { isArmed: !track.isArmed }); }}
+                        className={`p-1 rounded hover:bg-gray-200 transition-colors ${track.isArmed ? 'text-red-500' : 'text-gray-400'}`}
+                        title={track.isArmed ? "Disarm Track" : "Arm for Recording"}
+                      >
+                        <Radio size={12} className={track.isArmed ? "animate-pulse" : ""} />
+                      </button>
+                    )}
                     {track.type === TrackType.AUDIO && (
                       <button
                         onClick={(e) => { e.stopPropagation(); onTrackUpdate(track.id, { isMuted: !track.isMuted }); }}

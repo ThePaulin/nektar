@@ -6,6 +6,7 @@ import { ExportDialog } from './components/ExportDialog';
 import { Recorder } from './components/Recorder';
 import { AudioRecorder } from './components/AudioRecorder';
 import { TextEditor } from './components/TextEditor';
+import { TrackActionArea } from './components/TrackActionArea';
 import { VideoObjType, VideoClip, RecordingMode, Track, TrackType } from './types';
 import { videoDB } from './services/db';
 import {
@@ -18,8 +19,8 @@ const TIMELINE_MAX_HEIGHT: number = 623;
 const TIMELINE_MIN_HEIGHT: number = 315;
 
 const INITIAL_TRACKS: Track[] = [
-  { id: 'track-1', name: 'Video 1', type: TrackType.VIDEO, isVisible: true, isLocked: false, isMuted: false, order: 0 },
-  { id: 'track-2', name: 'Audio 1', type: TrackType.AUDIO, isVisible: true, isLocked: false, isMuted: false, order: 1 },
+  { id: 'track-1', name: 'Video 1', type: TrackType.VIDEO, isVisible: true, isLocked: false, isMuted: false, isArmed: true, order: 0 },
+  { id: 'track-2', name: 'Audio 1', type: TrackType.AUDIO, isVisible: true, isLocked: false, isMuted: false, isArmed: true, order: 1 },
 ];
 
 const MOCK_CLIPS: VideoObjType = [
@@ -264,6 +265,8 @@ export default function App() {
     setIsLoading(true);
     setLoadingMessage(`Importing ${file.name}...`);
 
+    const startTime = getModeStartTime();
+
     try {
       const videoUrl = URL.createObjectURL(file);
 
@@ -297,14 +300,33 @@ export default function App() {
         duration,
         sourceStart: 0,
         timelinePosition: {
-          start: currentTime,
-          end: currentTime + Math.min(duration, 5),
+          start: startTime,
+          end: startTime + Math.min(duration, 5),
         },
         blobId,
       };
 
+      const clipDuration = newClip.timelinePosition.end - newClip.timelinePosition.start;
+      let updatedClips = [...clips];
+      if (recordingMode === 'insert' || recordingMode === 'append') {
+        updatedClips = updatedClips.map(clip => {
+          if (clip.trackId === selectedTrackId && clip.timelinePosition.start >= startTime) {
+            return {
+              ...clip,
+              timelinePosition: {
+                start: clip.timelinePosition.start + clipDuration,
+                end: clip.timelinePosition.end + clipDuration
+              }
+            };
+          }
+          return clip;
+        });
+      }
+
       await videoDB.saveClip(newClip, file);
-      pushToHistory([...clips, newClip]);
+      const finalClips = resolveOverlaps(newClip, [...updatedClips, newClip]);
+      pushToHistory(finalClips);
+      setSelectedClipIds([newId]);
       setStorageError(null);
     } catch (err: any) {
       console.error("Failed to import clip:", err);
@@ -393,12 +415,14 @@ export default function App() {
     setTempState(null);
   };
 
-  const resolveOverlaps = (updatedClip: VideoClip, allClips: VideoObjType): VideoObjType => {
+  const resolveOverlaps = (updatedClip: VideoClip, allClips: VideoObjType, ignoreIds: number[] = []): VideoObjType => {
     const uStart = updatedClip.timelinePosition.start;
     const uEnd = updatedClip.timelinePosition.end;
 
     return allClips.map(clip => {
       if (clip.id === updatedClip.id) return updatedClip;
+      if (ignoreIds.includes(clip.id)) return clip;
+      if (clip.trackId !== updatedClip.trackId) return clip;
 
       const cStart = clip.timelinePosition.start;
       const cEnd = clip.timelinePosition.end;
@@ -442,28 +466,35 @@ export default function App() {
     }).filter(c => c.timelinePosition.end > c.timelinePosition.start);
   };
 
-  const handleStartRecording = () => {
-    setIsPlaying(false);
+  const getModeStartTime = useCallback(() => {
     if (recordingMode === 'insert') {
-      setRecordingStartTime(currentTime);
+      return currentTime;
     } else {
-      let appendTime = 0;
-      const selectedClips = clips.filter(c => selectedClipIds.includes(c.id));
-      if (selectedClips.length > 0) {
-        // Append to the end of the last selected clip
-        appendTime = Math.max(...selectedClips.map(c => c.timelinePosition.end));
-      } else {
-        // No clip selected, append to the end of the last clip on the selected track
-        const trackClips = clips.filter(c => c.trackId === selectedTrackId);
-        if (trackClips.length > 0) {
-          appendTime = Math.max(...trackClips.map(c => c.timelinePosition.end));
-        } else {
-          // No clips on track, start at 0:00
-          appendTime = 0;
-        }
+      // For append mode, we find the end of the last clip on the selected track
+      const trackClips = clips.filter(c => c.trackId === selectedTrackId);
+      if (trackClips.length > 0) {
+        return Math.max(...trackClips.map(c => c.timelinePosition.end));
       }
-      setRecordingStartTime(appendTime);
-      setCurrentTime(appendTime);
+      return 0;
+    }
+  }, [recordingMode, currentTime, clips, selectedTrackId]);
+
+  const handleStartRecording = () => {
+    const targetTrack = tracks.find(t => t.id === selectedTrackId);
+    if (!targetTrack) return;
+
+    if (targetTrack.type === TrackType.VIDEO || targetTrack.type === TrackType.AUDIO) {
+      if (!targetTrack.isArmed) {
+        alert('Track must be armed for recording. Please arm the track first.');
+        return;
+      }
+    }
+
+    setIsPlaying(false);
+    const startTime = getModeStartTime();
+    setRecordingStartTime(startTime);
+    if (recordingMode === 'append') {
+      setCurrentTime(startTime);
     }
   };
 
@@ -489,11 +520,11 @@ export default function App() {
       blobId,
     };
 
-    // If in insert or append mode, shift all subsequent clips forward
+    // If in insert or append mode, shift all subsequent clips forward on the same track
     let updatedClips = [...clips];
     if (recordingMode === 'insert' || recordingMode === 'append') {
       updatedClips = updatedClips.map(clip => {
-        if (clip.timelinePosition.start >= recordingStartTime) {
+        if (clip.trackId === selectedTrackId && clip.timelinePosition.start >= recordingStartTime) {
           return {
             ...clip,
             timelinePosition: {
@@ -532,14 +563,17 @@ export default function App() {
 
   const handleClipsUpdate = (updates: { id: number; newStart: number; newTrackId?: string }[]) => {
     setClips((prev) => {
-      const nextClips = [...prev];
+      let nextClips = [...prev];
+      const updateIds = updates.map(u => u.id);
+      const updatedClips: VideoClip[] = [];
+
       updates.forEach(({ id, newStart, newTrackId }) => {
         const index = nextClips.findIndex(c => c.id === id);
         if (index !== -1) {
           const clip = nextClips[index];
           const duration = clip.timelinePosition.end - clip.timelinePosition.start;
           const clampedStart = Math.max(0, newStart);
-          nextClips[index] = {
+          const updated = {
             ...clip,
             trackId: newTrackId || clip.trackId,
             timelinePosition: {
@@ -547,8 +581,16 @@ export default function App() {
               end: clampedStart + duration,
             },
           };
+          nextClips[index] = updated;
+          updatedClips.push(updated);
         }
       });
+
+      // Resolve overlaps for each updated clip against non-moving clips
+      updatedClips.forEach(updatedClip => {
+        nextClips = resolveOverlaps(updatedClip, nextClips, updateIds);
+      });
+
       return nextClips;
     });
   };
@@ -561,6 +603,7 @@ export default function App() {
       isVisible: true,
       isLocked: false,
       isMuted: false,
+      isArmed: type === TrackType.VIDEO || type === TrackType.AUDIO,
       order: tracks.length,
     };
     setTracks([...tracks, newTrack]);
@@ -603,13 +646,14 @@ export default function App() {
     setTracks([...tracks, newTrack]);
     pushToHistory([...clips, ...newClips]);
     setSelectedTrackId(newTrackId);
+    setSelectedClipIds(newClips.map(c => c.id));
   };
 
   const handleUpdateTrack = (trackId: string, updates: Partial<Track>) => {
     setTracks(tracks.map(t => t.id === trackId ? { ...t, ...updates } : t));
   };
 
-  const handleAddTextClip = async (type: TrackType.TEXT | TrackType.SUBTITLE, startTime?: number) => {
+  const handleAddTextClip = async (type: TrackType.TEXT | TrackType.SUBTITLE, startTimeOverride?: number) => {
     const targetTrack = tracks.find(t => t.id === selectedTrackId && t.type === type);
     if (!targetTrack) {
       alert(`Please select a ${type} track first.`);
@@ -617,7 +661,8 @@ export default function App() {
     }
 
     const newId = Date.now();
-    const actualStartTime = Math.max(0, startTime !== undefined ? startTime : currentTime);
+    const startTime = getModeStartTime();
+    const actualStartTime = Math.max(0, startTimeOverride !== undefined ? startTimeOverride : startTime);
     const newClip: VideoClip = {
       id: newId,
       trackId: selectedTrackId,
@@ -637,6 +682,23 @@ export default function App() {
       }
     };
 
+    const clipDuration = newClip.timelinePosition.end - newClip.timelinePosition.start;
+    let updatedClips = [...clips];
+    if (recordingMode === 'insert' || recordingMode === 'append') {
+      updatedClips = updatedClips.map(clip => {
+        if (clip.trackId === selectedTrackId && clip.timelinePosition.start >= actualStartTime) {
+          return {
+            ...clip,
+            timelinePosition: {
+              start: clip.timelinePosition.start + clipDuration,
+              end: clip.timelinePosition.end + clipDuration
+            }
+          };
+        }
+        return clip;
+      });
+    }
+
     try {
       await videoDB.saveClip(newClip);
       setStorageError(null);
@@ -644,7 +706,9 @@ export default function App() {
       console.error("Failed to save text clip to IndexedDB:", err);
     }
 
-    pushToHistory([...clips, newClip]);
+    const finalClips = resolveOverlaps(newClip, [...updatedClips, newClip]);
+    pushToHistory(finalClips);
+    setSelectedClipIds([newId]);
   };
 
   const handleClipTrim = (clipId: number, side: 'left' | 'right', newTime: number) => {
@@ -735,6 +799,7 @@ export default function App() {
       ].sort((a, b) => a.timelinePosition.start - b.timelinePosition.start);
 
       pushToHistory(newState);
+      setSelectedClipIds([secondClip.id]);
     }
   };
 
@@ -787,7 +852,7 @@ export default function App() {
         const start = clip.timelinePosition.start;
 
         newState = newState.filter(c => c.id !== clip.id).map(c => {
-          if (c.timelinePosition.start >= start) {
+          if (c.trackId === clip.trackId && c.timelinePosition.start >= start) {
             return {
               ...c,
               timelinePosition: {
@@ -970,12 +1035,22 @@ export default function App() {
   // Keyboard Shortcuts
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      const key = e.key.toLowerCase();
+
+      // Escape: Deselect all and blur inputs
+      if (key === 'escape') {
+        setSelectedClipIds([]);
+        if (document.activeElement instanceof HTMLElement) {
+          document.activeElement.blur();
+        }
+        return;
+      }
+
       // Don't trigger shortcuts if user is typing in an input
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) {
         return;
       }
 
-      const key = e.key.toLowerCase();
       const isShift = e.shiftKey;
       const isAlt = e.altKey;
       const isMod = e.ctrlKey || e.metaKey;
@@ -1036,12 +1111,6 @@ export default function App() {
       if (e.code === 'Space') {
         e.preventDefault();
         togglePlay();
-      }
-
-      // Escape: Deselect all
-      if (key === 'escape') {
-        e.preventDefault();
-        setSelectedClipIds([]);
       }
 
       // x: Delete
@@ -1352,39 +1421,104 @@ export default function App() {
       {/* Main Content Area */}
       <main className="flex-grow min-h-0 flex items-start justify-end p-4 bg-gradient-to-b from-[#1A1A1A] to-[#0D0D0D] overflow-hidden"
       >
-        <div className="relative w-full flex justify-center overflow-hidden items-start gap-8"
+        <div className="relative w-full flex justify-end overflow-hidden items-start gap-8"
 
           style={{ height: `${((window.innerHeight ?? 0) - timelineHeight)}px` }}
         >
           {/* Left Side: Recorder or Text Editor */}
-          <div className="h-full w-full max-w-[600px] slide-in-from-left duration-500">
-            {selectedClipIds.length === 1 && (clips.find(c => c.id === selectedClipIds[0])?.type === TrackType.TEXT || clips.find(c => c.id === selectedClipIds[0])?.type === TrackType.SUBTITLE || tracks.find(t => t.id === selectedTrackId)?.type === TrackType.TEXT || tracks.find(t => t.id === selectedTrackId)?.type === TrackType.SUBTITLE) ? (
+          <div className="h-full w-full max-w-[600px] min-h-0 flex justify-end slide-in-from-left duration-500">
+            {selectedClipIds.length === 1 ? (
               <div className="w-full h-full flex justify-center overflow-y-auto">
-                <TextEditor
-                  clip={clips.find(c => c.id === selectedClipIds[0])!}
-                  onUpdate={handleClipUpdate}
-                />
+                {clips.find(c => c.id === selectedClipIds[0])?.type === TrackType.TEXT ||
+                  clips.find(c => c.id === selectedClipIds[0])?.type === TrackType.SUBTITLE ? (
+                  <TextEditor
+                    clip={clips.find(c => c.id === selectedClipIds[0])!}
+                    onUpdate={handleClipUpdate}
+                  />
+                ) : (
+                  <div className="w-full h-full flex flex-col items-center justify-center bg-[#111] rounded-xl border border-white/5">
+                    <div className="p-6 bg-white/5 rounded-2xl border border-white/10 mb-4">
+                      {clips.find(c => c.id === selectedClipIds[0])?.type === TrackType.VIDEO ? (
+                        <Video size={24} className="text-blue-500/50" />
+                      ) : clips.find(c => c.id === selectedClipIds[0])?.type === TrackType.AUDIO ? (
+                        <Music size={24} className="text-emerald-500/50" />
+                      ) : (
+                        <ImageIcon size={24} className="text-amber-500/50" />
+                      )}
+                    </div>
+                    <h3 className="text-lg font-bold text-white mb-1">{clips.find(c => c.id === selectedClipIds[0])?.label}</h3>
+                    <p className="text-gray-500 text-xs uppercase tracking-widest font-bold">{clips.find(c => c.id === selectedClipIds[0])?.type} Clip Selected</p>
+                  </div>
+                )}
               </div>
-            ) : tracks.find(t => t.id === selectedTrackId)?.type === TrackType.AUDIO ? (
-              <div className=" aspect-video w-full">
-                <AudioRecorder
-                  onRecordingComplete={handleRecordingComplete}
-                  onStartRecording={handleStartRecording}
-                  isActive={tracks.find(t => t.id === selectedTrackId)?.type === TrackType.AUDIO}
-                />
-              </div>
-            ) : null}
-            {/* always have video preview ready, hide/show using CSS */}
-            <div className={`aspect-video ${(tracks.find(t => t.id === selectedTrackId)?.type === TrackType.VIDEO || (selectedClipIds.length === 1 && clips.find(c => c.id === selectedClipIds[0])?.type === TrackType.VIDEO)) ? 'flex justify-center' : 'hidden'}`}>
-              <div className="">
-                <Recorder
-                  onRecordingComplete={handleRecordingComplete}
-                  onStartRecording={handleStartRecording}
-                  isActive={tracks.find(t => t.id === selectedTrackId)?.type === TrackType.VIDEO || (selectedClipIds.length === 1 && clips.find(c => c.id === selectedClipIds[0])?.type === TrackType.VIDEO)}
-                />
-              </div>
-            </div>
+            ) : (
+              <div className="w-fit h-full  overflow-hidden">
+                {(() => {
+                  const targetTrack = tracks.find(t => t.id === selectedTrackId);
+                  if (!targetTrack) return null;
 
+                  if (targetTrack.type === TrackType.VIDEO) {
+                    return targetTrack.isArmed ? (
+                      <Recorder
+                        onRecordingComplete={handleRecordingComplete}
+                        onStartRecording={handleStartRecording}
+                        isActive={true}
+                        isArmed={true}
+                      />
+                    ) : (
+                      <TrackActionArea
+                        track={targetTrack}
+                        recordingMode={recordingMode}
+                        onImport={handleImportClick}
+                        onAddText={() => { }}
+                      />
+                    );
+                  }
+
+                  if (targetTrack.type === TrackType.AUDIO) {
+                    return targetTrack.isArmed ? (
+                      <AudioRecorder
+                        onRecordingComplete={handleRecordingComplete}
+                        onStartRecording={handleStartRecording}
+                        isActive={true}
+                        isArmed={true}
+                      />
+                    ) : (
+                      <TrackActionArea
+                        track={targetTrack}
+                        recordingMode={recordingMode}
+                        onImport={handleImportClick}
+                        onAddText={() => { }}
+                      />
+                    );
+                  }
+
+                  if (targetTrack.type === TrackType.IMAGE) {
+                    return (
+                      <TrackActionArea
+                        track={targetTrack}
+                        recordingMode={recordingMode}
+                        onImport={handleImportClick}
+                        onAddText={() => { }}
+                      />
+                    );
+                  }
+
+                  if (targetTrack.type === TrackType.TEXT || targetTrack.type === TrackType.SUBTITLE) {
+                    return (
+                      <TrackActionArea
+                        track={targetTrack}
+                        recordingMode={recordingMode}
+                        onImport={() => { }}
+                        onAddText={() => handleAddTextClip(targetTrack.type as TrackType.TEXT | TrackType.SUBTITLE)}
+                      />
+                    );
+                  }
+
+                  return null;
+                })()}
+              </div>
+            )}
           </div>
 
           {/* Right Side: Video Preview Area */}

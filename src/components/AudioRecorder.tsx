@@ -6,9 +6,10 @@ interface AudioRecorderProps {
   onStartRecording?: () => void;
   onClose?: () => void;
   isActive?: boolean;
+  isArmed?: boolean;
 }
 
-export const AudioRecorder: React.FC<AudioRecorderProps> = ({ onRecordingComplete, onStartRecording, onClose, isActive = true }) => {
+export const AudioRecorder: React.FC<AudioRecorderProps> = ({ onRecordingComplete, onStartRecording, onClose, isActive = true, isArmed = true }) => {
   const [isRecording, setIsRecording] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
   const [stream, setStream] = useState<MediaStream | null>(null);
@@ -185,94 +186,91 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({ onRecordingComplet
   };
 
   return (
-    <div className="relative aspect-video w-full flex flex-col bg-[#111] overflow-hidden border border-white/10 shadow-2xl">
+    <div className="relative aspect-video w-fit h-full aspect-video flex flex-col bg-[#111] overflow-hidden border border-white/10 shadow-2xl rounded-xl min-h-0">
       {/* Header */}
-
-      <div className="absolute top-0 h-12 bg-gradient-to-b from-black/60 to-transparent z-10 flex items-center justify-between px-4">
-        <div className=" flex items-center space-x-2">
-          <div className={`w-2 h-2 rounded-full ${isRecording ? 'bg-red-500 animate-pulse' : 'bg-gray-500'}`} />
-          <span className="text-[10px] font-medium text-white uppercase tracking-wider">
-            {isRecording ? 'Recording Audio' : 'Audio Preview'}
+      <div className="absolute top-0 left-0 right-0 h-10 bg-gradient-to-b from-black/60 to-transparent z-10 flex items-center justify-between px-3">
+        <div className="flex items-center space-x-2">
+          <div className={`w-1.5 h-1.5 rounded-full ${isRecording ? 'bg-red-500 animate-pulse' : 'bg-gray-500'}`} />
+          <span className="text-[9px] font-bold text-white uppercase tracking-wider">
+            {isRecording ? 'Recording Audio' : 'Audio'}
           </span>
         </div>
         {onClose && (
-          <button onClick={onClose} className="p-1.5 hover:bg-white/10 rounded-full transition-colors">
-            <X size={16} />
+          <button onClick={onClose} className="p-1 hover:bg-white/10 rounded-full transition-colors">
+            <X size={14} />
           </button>
         )}
       </div>
 
       {/* Audio Visualizer Area */}
-      <div className=" w-full relative aspect-video bg-black flex flex-col items-center justify-center overflow-hidden">
+      <div className="flex-1 w-full relative bg-black flex flex-col items-center justify-center overflow-hidden min-h-0">
         {/* Background pulses based on audio level */}
         <div
           className="absolute inset-0 bg-blue-600/5 transition-opacity duration-75"
           style={{ opacity: audioLevel * 0.5 }}
         />
 
-        <div className="relative flex items-center justify-center w-full px-12">
+        <div className="relative flex items-center justify-center w-full px-6">
           {/* Left Level Meter */}
-          <div className="absolute left-8 flex flex-col space-y-0.5 h-32 justify-center">
-            {[...Array(20)].map((_, i) => {
-              const level = (20 - i) / 20;
+          <div className="absolute left-4 flex flex-col space-y-0.5 h-24 justify-center">
+            {[...Array(12)].map((_, i) => {
+              const level = (12 - i) / 12;
               const isActive = audioLevel > level;
               return (
                 <div
                   key={i}
-                  className={`w-4 h-1 rounded-sm transition-colors duration-75 ${isActive
-                    ? i < 4 ? 'bg-red-500' : i < 8 ? 'bg-yellow-500' : 'bg-emerald-500'
+                  className={`w-3 h-1 rounded-sm transition-colors duration-75 ${isActive
+                    ? i < 3 ? 'bg-red-500' : i < 6 ? 'bg-yellow-500' : 'bg-emerald-500'
                     : 'bg-white/5'
                     }`}
                 />
               );
             })}
-            <span className="text-[8px] text-gray-500 font-mono mt-1 text-center">L</span>
           </div>
 
           <div className="relative flex items-center justify-center">
             {/* Pulsing circles */}
             <div
-              className="absolute w-32 h-32 bg-blue-600/20 rounded-full transition-transform duration-75"
+              className="absolute w-24 h-24 bg-blue-600/20 rounded-full transition-transform duration-75"
               style={{ transform: `scale(${1 + audioLevel * 0.5})` }}
             />
             <div
-              className="absolute w-24 h-24 bg-blue-600/40 rounded-full transition-transform duration-75"
+              className="absolute w-16 h-16 bg-blue-600/40 rounded-full transition-transform duration-75"
               style={{ transform: `scale(${1 + audioLevel * 0.3})` }}
             />
 
-            <div className="relative z-10 w-16 h-16 bg-blue-600 rounded-full flex items-center justify-center shadow-lg shadow-blue-600/40">
-              <Mic size={32} className="text-white" />
+            <div className="relative z-10 w-12 h-12 bg-blue-600 rounded-full flex items-center justify-center shadow-lg shadow-blue-600/40">
+              <Mic size={24} className="text-white" />
             </div>
           </div>
 
           {/* Right Level Meter */}
-          <div className="absolute right-8 flex flex-col space-y-0.5 h-32 justify-center">
-            {[...Array(20)].map((_, i) => {
-              const level = (20 - i) / 20;
+          <div className="absolute right-4 flex flex-col space-y-0.5 h-24 justify-center">
+            {[...Array(12)].map((_, i) => {
+              const level = (12 - i) / 12;
               const isActive = audioLevel > level;
               return (
                 <div
                   key={i}
-                  className={`w-4 h-1 rounded-sm transition-colors duration-75 ${isActive
-                    ? i < 4 ? 'bg-red-500' : i < 8 ? 'bg-yellow-500' : 'bg-emerald-500'
+                  className={`w-3 h-1 rounded-sm transition-colors duration-75 ${isActive
+                    ? i < 3 ? 'bg-red-500' : i < 6 ? 'bg-yellow-500' : 'bg-emerald-500'
                     : 'bg-white/5'
                     }`}
                 />
               );
             })}
-            <span className="text-[8px] text-gray-500 font-mono mt-1 text-center">R</span>
           </div>
         </div>
 
-        <div className="mt-6 flex flex-col items-center">
-          <span className="text-xs text-gray-400 font-medium uppercase tracking-widest">Microphone Active</span>
-          <div className="mt-2 flex space-x-1 h-4 items-end">
-            {[...Array(12)].map((_, i) => (
+        <div className="mt-4 flex flex-col items-center shrink-0">
+          <span className="text-[8px] text-gray-400 font-bold uppercase tracking-widest">Microphone Active</span>
+          <div className="mt-1.5 flex space-x-1 h-3 items-end">
+            {[...Array(10)].map((_, i) => (
               <div
                 key={i}
-                className="w-1 bg-blue-500 rounded-full transition-all duration-75"
+                className="w-0.5 bg-blue-500 rounded-full transition-all duration-75"
                 style={{
-                  height: `${Math.max(20, audioLevel * 100 * (1 - Math.abs(i - 5.5) / 6))}%`,
+                  height: `${Math.max(20, audioLevel * 100 * (1 - Math.abs(i - 4.5) / 5))}%`,
                   opacity: 0.3 + audioLevel * 0.7
                 }}
               />
@@ -281,8 +279,8 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({ onRecordingComplet
         </div>
 
         {(isRecording || isPaused) && (
-          <div className="absolute top-4 right-4 bg-black/60 px-2 py-1 rounded-md backdrop-blur-md border border-white/10">
-            <span className="text-sm font-mono font-bold text-white tabular-nums">
+          <div className="absolute top-3 right-3 bg-black/60 px-2 py-0.5 rounded-md backdrop-blur-md border border-white/10">
+            <span className="text-xs font-mono font-bold text-white tabular-nums">
               {formatDuration(recordingTime)}
             </span>
           </div>
@@ -290,33 +288,37 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({ onRecordingComplet
       </div>
 
       {/* Controls */}
-      <div className="absolute bottom-2 right-2 h-20 bg-transparent flex items-center justify-center space-x-3 border-t border-white/5">
-        {!isRecording && !isPaused ? (
-          <button
-            onClick={startRecording}
-            className="group flex items-center space-x-2 bg-red-600 opacity-70 hover:opacity-100 hover:bg-red-700 text-white px-3 py-1 rounded-full transition-all hover:scale-105 shadow-lg shadow-red-600/20"
-          >
-            <Circle size={6} fill="currentColor" />
-            <span className="text-xs font-bold uppercase tracking-tight">Start Recording</span>
-          </button>
-        ) : (
-          <>
+      <div className="absolute bottom-0 right-0 h-12 bg-transparent border-t border-white/5 flex items-center justify-end px-4">
+        <div className="flex items-center space-x-3">
+          {!isRecording && !isPaused ? (
             <button
-              onClick={isPaused ? resumeRecording : pauseRecording}
-              className={`group flex items-center space-x-2 ${isPaused ? 'bg-blue-600 hover:bg-blue-700' : 'bg-white/10 hover:bg-white/20'} text-white px-3 py-1 rounded-full transition-all hover:scale-105 shadow-lg`}
+              onClick={startRecording}
+              disabled={!isArmed}
+              className={`group flex items-center space-x-2 bg-red-600 ${!isArmed ? 'opacity-30 cursor-not-allowed' : 'opacity-90 hover:opacity-100 hover:bg-red-700'} text-white px-4 py-1.5 rounded-full transition-all hover:scale-105 shadow-lg shadow-red-600/20`}
+              title={!isArmed ? "Track must be armed to record" : ""}
             >
-              {isPaused ? <Circle size={6} fill="currentColor" /> : <div className="flex space-x-1"><div className="w-1 h-4 bg-white rounded-full" /><div className="w-1 h-4 bg-white rounded-full" /></div>}
-              <span className="text-xs font-bold uppercase tracking-tight">{isPaused ? 'Resume' : 'Pause'}</span>
+              <Circle size={8} fill="currentColor" />
+              <span className="text-[10px] font-bold uppercase tracking-wider">Start Recording</span>
             </button>
-            <button
-              onClick={stopRecording}
-              className="group flex items-center space-x-2 bg-white text-black px-3 py-1 rounded-full transition-all hover:scale-105 shadow-lg"
-            >
-              <Square size={6} fill="currentColor" />
-              <span className="text-xs font-bold uppercase tracking-tight">Stop</span>
-            </button>
-          </>
-        )}
+          ) : (
+            <>
+              <button
+                onClick={isPaused ? resumeRecording : pauseRecording}
+                className={`group flex items-center space-x-2 ${isPaused ? 'bg-blue-600 hover:bg-blue-700' : 'bg-white/10 hover:bg-white/20'} text-white px-4 py-1.5 rounded-full transition-all hover:scale-105 shadow-lg`}
+              >
+                {isPaused ? <Circle size={8} fill="currentColor" /> : <div className="flex space-x-1"><div className="w-1 h-3 bg-white rounded-full" /><div className="w-1 h-3 bg-white rounded-full" /></div>}
+                <span className="text-[10px] font-bold uppercase tracking-wider">{isPaused ? 'Resume' : 'Pause'}</span>
+              </button>
+              <button
+                onClick={stopRecording}
+                className="group flex items-center space-x-2 bg-white text-black px-4 py-1.5 rounded-full transition-all hover:scale-105 shadow-lg"
+              >
+                <Square size={8} fill="currentColor" />
+                <span className="text-[10px] font-bold uppercase tracking-wider">Stop</span>
+              </button>
+            </>
+          )}
+        </div>
       </div>
     </div>
   );
