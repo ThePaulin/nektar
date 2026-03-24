@@ -5,7 +5,7 @@ import { VideoPreview } from './components/VideoPreview';
 import { ExportDialog } from './components/ExportDialog';
 import { Recorder } from './components/Recorder';
 import { AudioRecorder } from './components/AudioRecorder';
-import { TextEditor } from './components/TextEditor';
+import { ClipPropertiesPanel } from './components/ClipPropertiesPanel';
 import { TrackActionArea } from './components/TrackActionArea';
 import { VideoObjType, VideoClip, RecordingMode, Track, TrackType } from './types';
 import { videoDB } from './services/db';
@@ -241,12 +241,21 @@ export default function App() {
     fileInputRef.current?.click();
   };
 
+  const isTrackLocked = (trackId: string) => {
+    return tracks.find(t => t.id === trackId)?.isLocked || false;
+  };
+
   const handleFileChange = async (e: ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
     const targetTrack = tracks.find(t => t.id === selectedTrackId);
     if (!targetTrack) return;
+
+    if (targetTrack.isLocked) {
+      alert('This track is locked and cannot be modified.');
+      return;
+    }
 
     // Validate file type based on track type
     if (targetTrack.type === TrackType.VIDEO && !file.type.startsWith('video/')) {
@@ -502,20 +511,28 @@ export default function App() {
     const targetTrack = tracks.find(t => t.id === selectedTrackId);
     if (!targetTrack) return;
 
+    if (targetTrack.isLocked) {
+      alert('This track is locked and cannot be modified.');
+      return;
+    }
+
     const newId = Date.now();
     const blobId = `blob_${newId}`;
+    const isImage = targetTrack.type === TrackType.IMAGE;
+    const finalDuration = isImage ? 5 : duration;
+
     const newClip: VideoClip = {
       id: newId,
       trackId: selectedTrackId,
       type: targetTrack.type,
-      label: `Recording ${new Date().toLocaleTimeString()}`,
-      videoUrl,
-      thumbnailUrl: `https://picsum.photos/seed/${newId}/200/120`,
-      duration,
+      label: isImage ? `Photo ${new Date().toLocaleTimeString()}` : `Recording ${new Date().toLocaleTimeString()}`,
+      videoUrl: isImage ? undefined : videoUrl,
+      thumbnailUrl: isImage ? videoUrl : `https://picsum.photos/seed/${newId}/200/120`,
+      duration: finalDuration,
       sourceStart: 0,
       timelinePosition: {
         start: recordingStartTime,
-        end: recordingStartTime + duration,
+        end: recordingStartTime + finalDuration,
       },
       blobId,
     };
@@ -528,8 +545,8 @@ export default function App() {
           return {
             ...clip,
             timelinePosition: {
-              start: clip.timelinePosition.start + duration,
-              end: clip.timelinePosition.end + duration
+              start: clip.timelinePosition.start + finalDuration,
+              end: clip.timelinePosition.end + finalDuration
             }
           };
         }
@@ -562,6 +579,17 @@ export default function App() {
   };
 
   const handleClipsUpdate = (updates: { id: number; newStart: number; newTrackId?: string }[]) => {
+    // Check if any of the clips are on locked tracks
+    const isAnyClipLocked = updates.some(u => {
+      const clip = clips.find(c => c.id === u.id);
+      if (!clip) return false;
+      if (isTrackLocked(clip.trackId)) return true;
+      if (u.newTrackId && isTrackLocked(u.newTrackId)) return true;
+      return false;
+    });
+
+    if (isAnyClipLocked) return;
+
     setClips((prev) => {
       let nextClips = [...prev];
       const updateIds = updates.map(u => u.id);
@@ -603,7 +631,7 @@ export default function App() {
       isVisible: true,
       isLocked: false,
       isMuted: false,
-      isArmed: type === TrackType.VIDEO || type === TrackType.AUDIO,
+      isArmed: type === TrackType.VIDEO || type === TrackType.AUDIO || type === TrackType.SCREEN || type === TrackType.IMAGE,
       order: tracks.length,
     };
     setTracks([...tracks, newTrack]);
@@ -653,10 +681,16 @@ export default function App() {
     setTracks(tracks.map(t => t.id === trackId ? { ...t, ...updates } : t));
   };
 
-  const handleAddTextClip = async (type: TrackType.TEXT | TrackType.SUBTITLE, startTimeOverride?: number) => {
-    const targetTrack = tracks.find(t => t.id === selectedTrackId && t.type === type);
+  const handleAddTextClip = async (type: TrackType.TEXT | TrackType.SUBTITLE, startTimeOverride?: number, trackIdOverride?: string) => {
+    const finalTrackId = trackIdOverride || selectedTrackId;
+    const targetTrack = tracks.find(t => t.id === finalTrackId && t.type === type);
     if (!targetTrack) {
       alert(`Please select a ${type} track first.`);
+      return;
+    }
+
+    if (targetTrack.isLocked) {
+      alert('This track is locked and cannot be modified.');
       return;
     }
 
@@ -665,7 +699,7 @@ export default function App() {
     const actualStartTime = Math.max(0, startTimeOverride !== undefined ? startTimeOverride : startTime);
     const newClip: VideoClip = {
       id: newId,
-      trackId: selectedTrackId,
+      trackId: finalTrackId,
       label: type === TrackType.TEXT ? 'New Text' : 'New Subtitle',
       type,
       content: type === TrackType.TEXT ? 'Enter text here' : 'Enter subtitle here',
@@ -686,7 +720,7 @@ export default function App() {
     let updatedClips = [...clips];
     if (recordingMode === 'insert' || recordingMode === 'append') {
       updatedClips = updatedClips.map(clip => {
-        if (clip.trackId === selectedTrackId && clip.timelinePosition.start >= actualStartTime) {
+        if (clip.trackId === finalTrackId && clip.timelinePosition.start >= actualStartTime) {
           return {
             ...clip,
             timelinePosition: {
@@ -712,6 +746,9 @@ export default function App() {
   };
 
   const handleClipTrim = (clipId: number, side: 'left' | 'right', newTime: number) => {
+    const clipToTrim = clips.find(c => c.id === clipId);
+    if (clipToTrim && isTrackLocked(clipToTrim.trackId)) return;
+
     setClips((prev) => {
       const clip = prev.find(c => c.id === clipId);
       if (!clip) return prev;
@@ -769,6 +806,10 @@ export default function App() {
     );
 
     if (clipToSplit) {
+      if (isTrackLocked(clipToSplit.trackId)) {
+        alert('This track is locked and cannot be modified.');
+        return;
+      }
       const splitPoint = currentTime;
       const firstClipEnd = splitPoint;
       const secondClipStart = splitPoint;
@@ -815,6 +856,9 @@ export default function App() {
       if (clipUnderPlayhead) clipsToDelete = [clipUnderPlayhead];
     }
 
+    // Filter out clips on locked tracks
+    clipsToDelete = clipsToDelete.filter(c => !isTrackLocked(c.trackId));
+
     if (clipsToDelete.length > 0) {
       const deleteIds = clipsToDelete.map(c => c.id);
       const newState = clips.filter((c) => !deleteIds.includes(c.id));
@@ -840,6 +884,9 @@ export default function App() {
       );
       if (clipUnderPlayhead) clipsToDelete = [clipUnderPlayhead];
     }
+
+    // Filter out clips on locked tracks
+    clipsToDelete = clipsToDelete.filter(c => !isTrackLocked(c.trackId));
 
     if (clipsToDelete.length > 0) {
       let newState = [...clips];
@@ -875,16 +922,22 @@ export default function App() {
   };
 
   const handleClipRename = (clipId: number, newLabel: string) => {
+    const clip = clips.find(c => c.id === clipId);
+    if (clip && isTrackLocked(clip.trackId)) return;
     const newState = clips.map(c => c.id === clipId ? { ...c, label: newLabel } : c);
     pushToHistory(newState);
   };
 
   const handleClipContentUpdate = (clipId: number, newContent: string) => {
+    const clip = clips.find(c => c.id === clipId);
+    if (clip && isTrackLocked(clip.trackId)) return;
     const newState = clips.map(c => c.id === clipId ? { ...c, content: newContent } : c);
     pushToHistory(newState);
   };
 
   const handleClipUpdate = (clipId: number, updates: Partial<VideoClip>) => {
+    const clip = clips.find(c => c.id === clipId);
+    if (clip && isTrackLocked(clip.trackId)) return;
     const newState = clips.map(c => c.id === clipId ? { ...c, ...updates } : c);
     pushToHistory(newState);
   };
@@ -947,6 +1000,14 @@ export default function App() {
       
       setTracks(orderedTracks);
     }
+  };
+
+  const handleReorderTracks = (newTracks: Track[]) => {
+    const orderedTracks = newTracks.map((track, i) => ({
+      ...track,
+      order: i
+    }));
+    setTracks(orderedTracks);
   };
 
   const handleExportZip = async () => {
@@ -1425,31 +1486,23 @@ export default function App() {
 
           style={{ height: `${((window.innerHeight ?? 0) - timelineHeight)}px` }}
         >
-          {/* Left Side: Recorder or Text Editor */}
-          <div className="h-full w-full max-w-[600px] min-h-0 flex justify-end slide-in-from-left duration-500">
+          {/* Left Side: Recorder or Info Card */}
+          <div className="h-full w-full max-h-[300px] min-h-0 flex justify-end slide-in-from-left duration-500">
             {selectedClipIds.length === 1 ? (
               <div className="w-full h-full flex justify-center overflow-y-auto">
-                {clips.find(c => c.id === selectedClipIds[0])?.type === TrackType.TEXT ||
-                  clips.find(c => c.id === selectedClipIds[0])?.type === TrackType.SUBTITLE ? (
-                  <TextEditor
-                    clip={clips.find(c => c.id === selectedClipIds[0])!}
-                    onUpdate={handleClipUpdate}
-                  />
-                ) : (
-                  <div className="w-full h-full flex flex-col items-center justify-center bg-[#111] rounded-xl border border-white/5">
-                    <div className="p-6 bg-white/5 rounded-2xl border border-white/10 mb-4">
-                      {clips.find(c => c.id === selectedClipIds[0])?.type === TrackType.VIDEO ? (
-                        <Video size={24} className="text-blue-500/50" />
-                      ) : clips.find(c => c.id === selectedClipIds[0])?.type === TrackType.AUDIO ? (
-                        <Music size={24} className="text-emerald-500/50" />
-                      ) : (
-                        <ImageIcon size={24} className="text-amber-500/50" />
-                      )}
-                    </div>
-                    <h3 className="text-lg font-bold text-white mb-1">{clips.find(c => c.id === selectedClipIds[0])?.label}</h3>
-                    <p className="text-gray-500 text-xs uppercase tracking-widest font-bold">{clips.find(c => c.id === selectedClipIds[0])?.type} Clip Selected</p>
+                <div className="w-full h-full flex flex-col items-center justify-center bg-[#111] rounded-xl border border-white/5">
+                  <div className="p-6 bg-white/5 rounded-2xl border border-white/10 mb-4">
+                    {(() => {
+                      const clip = clips.find(c => c.id === selectedClipIds[0]);
+                      if (clip?.type === TrackType.VIDEO) return <Video size={24} className="text-blue-500/50" />;
+                      if (clip?.type === TrackType.AUDIO) return <Music size={24} className="text-emerald-500/50" />;
+                      if (clip?.type === TrackType.TEXT || clip?.type === TrackType.SUBTITLE) return <TypeIcon size={24} className="text-blue-400/50" />;
+                      return <ImageIcon size={24} className="text-amber-500/50" />;
+                    })()}
                   </div>
-                )}
+                  <h3 className="text-lg font-bold text-white mb-1">{clips.find(c => c.id === selectedClipIds[0])?.label}</h3>
+                  <p className="text-gray-500 text-xs uppercase tracking-widest font-bold">{clips.find(c => c.id === selectedClipIds[0])?.type} Clip Selected</p>
+                </div>
               </div>
             ) : (
               <div className="w-fit h-full  overflow-hidden">
@@ -1457,13 +1510,14 @@ export default function App() {
                   const targetTrack = tracks.find(t => t.id === selectedTrackId);
                   if (!targetTrack) return null;
 
-                  if (targetTrack.type === TrackType.VIDEO) {
+                  if (targetTrack.type === TrackType.VIDEO || targetTrack.type === TrackType.SCREEN) {
                     return targetTrack.isArmed ? (
                       <Recorder
                         onRecordingComplete={handleRecordingComplete}
                         onStartRecording={handleStartRecording}
                         isActive={true}
                         isArmed={true}
+                        trackType={targetTrack.type}
                       />
                     ) : (
                       <TrackActionArea
@@ -1471,6 +1525,7 @@ export default function App() {
                         recordingMode={recordingMode}
                         onImport={handleImportClick}
                         onAddText={() => { }}
+                        onArm={() => handleUpdateTrack(targetTrack.id, { isArmed: true })}
                       />
                     );
                   }
@@ -1489,17 +1544,27 @@ export default function App() {
                         recordingMode={recordingMode}
                         onImport={handleImportClick}
                         onAddText={() => { }}
+                        onArm={() => handleUpdateTrack(targetTrack.id, { isArmed: true })}
                       />
                     );
                   }
 
                   if (targetTrack.type === TrackType.IMAGE) {
-                    return (
+                    return targetTrack.isArmed ? (
+                      <Recorder
+                        onRecordingComplete={handleRecordingComplete}
+                        onStartRecording={handleStartRecording}
+                        isActive={true}
+                        isArmed={true}
+                        trackType={targetTrack.type}
+                      />
+                    ) : (
                       <TrackActionArea
                         track={targetTrack}
                         recordingMode={recordingMode}
                         onImport={handleImportClick}
                         onAddText={() => { }}
+                        onArm={() => handleUpdateTrack(targetTrack.id, { isArmed: true })}
                       />
                     );
                   }
@@ -1511,6 +1576,7 @@ export default function App() {
                         recordingMode={recordingMode}
                         onImport={() => { }}
                         onAddText={() => handleAddTextClip(targetTrack.type as TrackType.TEXT | TrackType.SUBTITLE)}
+                        onArm={() => handleUpdateTrack(targetTrack.id, { isArmed: true })}
                       />
                     );
                   }
@@ -1521,44 +1587,26 @@ export default function App() {
             )}
           </div>
 
-          {/* Right Side: Video Preview Area */}
-          <div className=" w-fit h-full flex flex-col items-center justify-start">
-            <div className="h-full w-fit group overflow-hidden border border-white/10 shadow-2xl">
-              <VideoPreview
-                clips={clips}
-                tracks={tracks}
-                currentTime={currentTime}
-                isPlaying={isPlaying}
-              />
-
-              {/* Overlay Play Button (Visible on hover or when paused) */}
-              {/*
-              {!isPlaying && (
-                <div className="absolute inset-0 flex items-center justify-center z-30 bg-black/20 group-hover:bg-black/40 transition-colors pointer-events-none">
-                  <div 
-                    className="w-12 h-12 bg-white/10 backdrop-blur-md rounded-full flex items-center justify-center border border-white/20 scale-110 pointer-events-auto cursor-pointer" 
-                    onClick={togglePlay}
-                  >
-                    <Play size={24} className="ml-1" />
-                  </div>
-                </div>
-              )}
-              */}
-            </div>
-
-            {/* Playback Controls */}
-            {/* 
-            <div className="mt-2 flex items-center space-x-8">
-              <div className="flex items-center space-x-4">
-                <button
-                  onClick={togglePlay}
-                  className="size-6 bg-white text-black flex items-center justify-center hover:bg-gray-200 transition-colors shadow-lg"
-                >
-                  {isPlaying ? <Pause size={12} /> : <Play size={12} className="ml-0.5" />}
-                </button>
+          {/* Right Side: Video Preview Area & Properties */}
+          <div className="flex h-full shrink-0">
+            <div className="w-fit h-full flex flex-col items-center justify-start">
+              <div className="h-full w-fit group overflow-hidden border border-white/10 shadow-2xl">
+                <VideoPreview
+                  clips={clips}
+                  tracks={tracks}
+                  currentTime={currentTime}
+                  isPlaying={isPlaying}
+                />
               </div>
             </div>
-            */}
+
+            {/* Properties Panel */}
+            {selectedClipIds.length === 1 && clips.find(c => c.id === selectedClipIds[0]) && (
+              <ClipPropertiesPanel 
+                clip={clips.find(c => c.id === selectedClipIds[0])!}
+                onUpdate={handleClipUpdate}
+              />
+            )}
           </div>
         </div>
       </main >
@@ -1582,6 +1630,7 @@ export default function App() {
             onTrackDelete={handleDeleteTrack}
             onTrackDuplicate={handleDuplicateTrack}
             onTrackMove={handleMoveTrack}
+            onTracksReorder={handleReorderTracks}
             onAddTrack={handleAddTrack}
             onAddTextClip={handleAddTextClip}
             currentTime={currentTime}

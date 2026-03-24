@@ -4,6 +4,7 @@ export enum TrackType {
   TEXT = 'text',
   SUBTITLE = 'subtitle',
   IMAGE = 'image',
+  SCREEN = 'screen',
 }
 
 export interface TimelinePosition {
@@ -23,6 +24,19 @@ export interface VideoClip {
   timelinePosition: TimelinePosition;
   blobId?: string; // ID for IndexedDB blob storage
   content?: string; // For text/subtitles
+  volume?: number; // 0 to 1
+  transform?: {
+    position: { x: number; y: number; z: number };
+    rotation: { x: number; y: number; z: number };
+    scale: { x: number; y: number };
+    opacity: number;
+    crop?: { top: number; right: number; bottom: number; left: number };
+  };
+  filters?: {
+    brightness: number;
+    saturation: number;
+    contrast?: number;
+  };
   style?: {
     fontSize?: number;
     fontWeight?: string | number;

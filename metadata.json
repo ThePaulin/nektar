@@ -1,5 +1,5 @@
 {
   "name": "Video Editor Timeline",
   "description": "A professional browser-based video recording timeline with clip management, playhead tracking, and comprehensive keyboard shortcuts.",
-  "requestFramePermissions": ["camera", "microphone"]
+  "requestFramePermissions": ["camera", "microphone", "display-capture"]
 }

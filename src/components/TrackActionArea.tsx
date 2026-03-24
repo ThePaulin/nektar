@@ -1,5 +1,5 @@
 import React from 'react';
-import { Upload, Plus, Video, Music, Image as ImageIcon, Type as TypeIcon, MousePointer2, ArrowRightToLine } from 'lucide-react';
+import { Upload, Plus, Video, Music, Image as ImageIcon, Type as TypeIcon, MousePointer2, ArrowRightToLine, Monitor } from 'lucide-react';
 import { Track, TrackType, RecordingMode } from '../types';
 
 interface TrackActionAreaProps {
@@ -7,6 +7,7 @@ interface TrackActionAreaProps {
   recordingMode: RecordingMode;
   onImport: () => void;
   onAddText: () => void;
+  onArm?: () => void;
 }
 
 export const TrackActionArea: React.FC<TrackActionAreaProps> = ({
@@ -14,10 +15,12 @@ export const TrackActionArea: React.FC<TrackActionAreaProps> = ({
   recordingMode,
   onImport,
   onAddText,
+  onArm,
 }) => {
   const isVideo = track.type === TrackType.VIDEO;
   const isAudio = track.type === TrackType.AUDIO;
   const isImage = track.type === TrackType.IMAGE;
+  const isScreen = track.type === TrackType.SCREEN;
   const isText = track.type === TrackType.TEXT || track.type === TrackType.SUBTITLE;
 
   const getIcon = () => {
@@ -25,6 +28,7 @@ export const TrackActionArea: React.FC<TrackActionAreaProps> = ({
     if (isAudio) return <Music size={16} className="text-emerald-500/50" />;
     if (isImage) return <ImageIcon size={16} className="text-amber-500/50" />;
     if (isText) return <TypeIcon size={16} className="text-purple-500/50" />;
+    if (isScreen) return <Monitor size={16} className="text-indigo-500/50" />;
     return null;
   };
 
@@ -32,6 +36,7 @@ export const TrackActionArea: React.FC<TrackActionAreaProps> = ({
     if (isVideo) return "Import Video";
     if (isAudio) return "Import Audio";
     if (isImage) return "Import Image";
+    if (isScreen) return "Screen Recording";
     if (isText) return track.type === TrackType.TEXT ? "New Text Instance" : "New Subtitle Instance";
     return "";
   };
@@ -39,6 +44,7 @@ export const TrackActionArea: React.FC<TrackActionAreaProps> = ({
   const getDescription = () => {
     const modeText = recordingMode === 'insert' ? "at current playhead" : "at end of track";
     if (isText) return `Add a new ${track.type} clip ${modeText}`;
+    if (isScreen) return `Record your screen ${modeText}`;
     return `Upload a ${track.type} file to this track ${modeText}`;
   };
 
@@ -59,11 +65,11 @@ export const TrackActionArea: React.FC<TrackActionAreaProps> = ({
 
         <div className="flex flex-col items-center space-y-2 w-full max-w-[180px] shrink-0">
           <button
-            onClick={isText ? onAddText : onImport}
+            onClick={isText ? onAddText : isScreen ? onArm : onImport}
             className="w-full flex items-center justify-center space-x-2 bg-white text-black py-2 rounded-lg font-bold transition-all hover:scale-[1.02] active:scale-[0.98] shadow-lg text-xs sm:text-sm"
           >
-            {isText ? <Plus size={14} /> : <Upload size={14} />}
-            <span>{isText ? "Create New" : "Choose File"}</span>
+            {isText ? <Plus size={14} /> : isScreen ? <Monitor size={14} /> : <Upload size={14} />}
+            <span>{isText ? "Create New" : isScreen ? "Start Recording" : "Choose File"}</span>
           </button>
 
           <div className="flex items-center space-x-2 px-2 py-1 bg-white/5 rounded-md border border-white/5">
@@ -84,3 +90,4 @@ export const TrackActionArea: React.FC<TrackActionAreaProps> = ({
     </div>
   );
 };
+

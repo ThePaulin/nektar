@@ -3,7 +3,6 @@ import { Clipboard, Trash2, Plus, Image as ImageIcon, Video, Music, Type, FileTe
 import { TrackType, Track, VideoClip, RecordingMode } from '../types';
 import { Recorder } from './Recorder';
 import { AudioRecorder } from './AudioRecorder';
-import { TextEditor } from './TextEditor';
 
 interface EditorPaneProps {
   selectedTrackId: string;
@@ -93,11 +92,18 @@ export const EditorPane: React.FC<EditorPaneProps> = ({
   };
 
   const renderContent = () => {
-    // If a text clip is selected, show the text editor
-    if (selectedClip && (selectedClip.type === TrackType.TEXT || selectedClip.type === TrackType.SUBTITLE)) {
+    // If a clip is selected, show info card
+    if (selectedClip) {
       return (
-        <div className="w-full h-full flex justify-center overflow-y-auto">
-          <TextEditor clip={selectedClip} onUpdate={onClipUpdate} />
+        <div className="w-full h-full flex flex-col items-center justify-center bg-[#111] rounded-xl border border-white/5">
+          <div className="p-6 bg-white/5 rounded-2xl border border-white/10 mb-4">
+            {selectedClip.type === TrackType.VIDEO && <Video size={24} className="text-blue-500/50" />}
+            {selectedClip.type === TrackType.AUDIO && <Music size={24} className="text-emerald-500/50" />}
+            {(selectedClip.type === TrackType.TEXT || selectedClip.type === TrackType.SUBTITLE) && <Type size={24} className="text-blue-400/50" />}
+            {selectedClip.type === TrackType.IMAGE && <ImageIcon size={24} className="text-amber-500/50" />}
+          </div>
+          <h3 className="text-lg font-bold text-white mb-1">{selectedClip.label}</h3>
+          <p className="text-gray-500 text-xs uppercase tracking-widest font-bold">{selectedClip.type} Clip Selected</p>
         </div>
       );
     }

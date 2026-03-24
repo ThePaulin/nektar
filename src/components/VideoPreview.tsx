@@ -40,6 +40,37 @@ export const VideoPreview: React.FC<VideoPreviewProps> = ({ clips, tracks, curre
     );
   }, [clips, tracks, currentTime]);
 
+  const getClipStyle = (clip: VideoClip, zIndex: number, isActive: boolean) => {
+    const transform = clip.transform || {
+      position: { x: 0, y: 0, z: 0 },
+      rotation: { x: 0, y: 0, z: 0 },
+      scale: { x: 1, y: 1 },
+      opacity: 1,
+      crop: { top: 0, right: 0, bottom: 0, left: 0 }
+    };
+    const filters = clip.filters || { brightness: 1, saturation: 1, contrast: 1 };
+    
+    const posX = transform.position.x * scaleFactor;
+    const posY = transform.position.y * scaleFactor;
+    const posZ = transform.position.z; // Extra z-offset on top of track z-index
+
+    return {
+      zIndex: zIndex + posZ,
+      opacity: isActive ? transform.opacity : 0,
+      pointerEvents: isActive ? 'auto' : 'none' as any,
+      filter: `brightness(${filters.brightness}) saturate(${filters.saturation}) contrast(${filters.contrast || 1})`,
+      transform: `
+        translate3d(${posX}px, ${posY}px, 0)
+        rotateX(${transform.rotation.x}deg)
+        rotateY(${transform.rotation.y}deg)
+        rotateZ(${transform.rotation.z}deg)
+        scale(${transform.scale.x}, ${transform.scale.y})
+      `,
+      clipPath: transform.crop ? `inset(${transform.crop.top}% ${transform.crop.right}% ${transform.crop.bottom}% ${transform.crop.left}%)` : undefined,
+      transition: 'opacity 0.2s ease',
+    };
+  };
+
   useEffect(() => {
     clips.forEach((clip) => {
       const video = videoRefs.current[clip.id];
@@ -55,8 +86,14 @@ export const VideoPreview: React.FC<VideoPreviewProps> = ({ clips, tracks, curre
           video.currentTime = localTime;
         }
 
-        // Only play audio if it's an audio or video track and not muted
-        video.muted = track.isMuted || (track.type !== TrackType.AUDIO && track.type !== TrackType.VIDEO);
+        // Only play audio if it's an audio, video, or screen track and not muted
+        const isMuted = track.isMuted || (track.type !== TrackType.AUDIO && track.type !== TrackType.VIDEO && track.type !== TrackType.SCREEN);
+        video.muted = isMuted;
+        
+        // Apply volume property
+        if (!isMuted) {
+          video.volume = clip.volume !== undefined ? clip.volume : 1;
+        }
 
         if (isPlaying && video.paused) {
           video.play().catch((e) => console.warn("Playback error:", e));
@@ -84,36 +121,34 @@ export const VideoPreview: React.FC<VideoPreviewProps> = ({ clips, tracks, curre
         // We want the top-most track (index 0) to have the highest z-index.
         const zIndex = tracks.length - trackIndex;
 
-        if (clip.type === TrackType.VIDEO || clip.type === TrackType.AUDIO) {
+        if (clip.type === TrackType.VIDEO || clip.type === TrackType.AUDIO || clip.type === TrackType.SCREEN) {
+          const style = getClipStyle(clip, zIndex, isActive);
           return (
             <video
               key={clip.id}
               ref={(el) => (videoRefs.current[clip.id] = el)}
               src={clip.videoUrl}
-              className={`absolute inset-0 w-full h-full object-cover transition-opacity duration-200 ${isActive && clip.type === TrackType.VIDEO ? 'opacity-100' : 'opacity-0 pointer-events-none'
-                }`}
-              style={{ zIndex }}
+              className="absolute inset-0 w-full h-full object-cover"
+              style={style}
               playsInline
             />
           );
         }
         if (clip.type === TrackType.IMAGE) {
+          const style = getClipStyle(clip, zIndex, isActive);
           return (
             <img
               key={clip.id}
               src={clip.thumbnailUrl}
-              className={`absolute inset-0 w-full h-full object-contain transition-opacity duration-200 ${isActive ? 'opacity-100' : 'opacity-0 pointer-events-none'
-                }`}
-              style={{ zIndex }}
+              className="absolute inset-0 w-full h-full object-contain"
+              style={style}
               referrerPolicy="no-referrer"
             />
           );
         }
         if (clip.type === TrackType.TEXT || clip.type === TrackType.SUBTITLE) {
           if (!isActive) return null;
-
-          const posX = (clip.style?.position?.x || 0) * scaleFactor;
-          const posY = (clip.style?.position?.y || 0) * scaleFactor;
+          const style = getClipStyle(clip, zIndex, isActive);
           const baseFontSize = clip.style?.fontSize || 48;
           const scaledFontSize = baseFontSize * scaleFactor;
 
@@ -121,14 +156,7 @@ export const VideoPreview: React.FC<VideoPreviewProps> = ({ clips, tracks, curre
             <div
               key={clip.id}
               className="absolute inset-0 flex items-center justify-center pointer-events-none"
-              style={{
-                zIndex,
-                transform: `
-                  translate(${posX}px, ${posY}px)
-                  scale(${clip.style?.scale || 1})
-                  rotate(${clip.style?.rotation || 0}deg)
-                `
-              }}
+              style={style}
             >
               <div
                 className={`px-4 py-2 rounded text-center ${clip.type === TrackType.SUBTITLE ? 'bg-black/60' : ''}`}

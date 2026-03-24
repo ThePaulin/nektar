@@ -1,9 +1,9 @@
 import React, { useRef, useEffect, useState } from 'react';
-import { motion } from 'motion/react';
+import { motion, Reorder } from 'motion/react';
 import {
   Plus, Scissors, Trash2, ZoomIn, ZoomOut, Download, CheckCircle2,
   Eye, EyeOff, Lock, Unlock, Volume2, VolumeX, MoreVertical, Copy, Trash,
-  ChevronUp, ChevronDown, Radio
+  ChevronUp, ChevronDown, Radio, GripVertical
 } from 'lucide-react';
 import { VideoClip, VideoObjType, Track, TrackType } from '../types';
 import { ThumbnailStrip } from './ThumbnailStrip';
@@ -33,8 +33,9 @@ interface TimelineProps {
   onTrackDelete: (id: string) => void;
   onTrackDuplicate: (id: string) => void;
   onTrackMove: (id: string, direction: 'up' | 'down') => void;
+  onTracksReorder: (newTracks: Track[]) => void;
   onAddTrack: (type: TrackType) => void;
-  onAddTextClip?: (type: TrackType.TEXT | TrackType.SUBTITLE, startTime?: number) => void;
+  onAddTextClip?: (type: TrackType.TEXT | TrackType.SUBTITLE, startTime?: number, trackId?: string) => void;
   pixelsPerSecond: number;
   onPixelsPerSecondChange: (value: number) => void;
   trackHeightMode: TrackHeightMode;
@@ -82,6 +83,7 @@ export const Timeline: React.FC<TimelineProps> = ({
   onTrackDelete,
   onTrackDuplicate,
   onTrackMove,
+  onTracksReorder,
   onAddTrack,
   onAddTextClip,
   onClipContentUpdate,
@@ -247,6 +249,10 @@ export const Timeline: React.FC<TimelineProps> = ({
       // Track switching logic
       const trackIndex = Math.floor(y / trackHeight);
       const targetTrack = tracks[trackIndex];
+      
+      // Prevent moving to a locked track
+      if (targetTrack && targetTrack.isLocked) return;
+
       let newTrackId = anchorInitial.trackId;
 
       if (targetTrack && anchorClip && targetTrack.type === anchorClip.type) {
@@ -333,6 +339,9 @@ export const Timeline: React.FC<TimelineProps> = ({
         const y2 = Math.max(startY, y);
 
         const marqueeSelectedIds = clips.filter(clip => {
+          const track = tracks.find(t => t.id === clip.trackId);
+          if (track?.isLocked) return false;
+
           const clipX1 = clip.timelinePosition.start * pixelsPerSecond;
           const clipX2 = clip.timelinePosition.end * pixelsPerSecond;
 
@@ -623,121 +632,134 @@ export const Timeline: React.FC<TimelineProps> = ({
         <div className="flex min-h-full">
           {/* Sidebar Body */}
           <div className="w-[200px] shrink-0 bg-white border-r border-gray-200 flex flex-col">
-            {tracks.map((track) => (
-              <div
-                key={track.id}
-                className="border-b border-gray-100 px-3 flex flex-col justify-center space-y-1 cursor-pointer transition-all hover:bg-gray-50"
-                style={{
-                  height: trackHeight,
-                  backgroundColor: selectedTrackId === track.id ? 'rgba(59, 130, 246, 0.05)' : 'transparent'
-                }}
-                onClick={() => onTrackSelect(track.id)}
-              >
-                <div className="flex items-center justify-between">
-                  {editingTrackId === track.id ? (
-                    <input
-                      autoFocus
-                      className="bg-white/10 border-none outline-none text-xs font-medium text-blue-600 w-full rounded px-1"
-                      value={trackEditValue}
-                      onChange={(e) => setTrackEditValue(e.target.value)}
-                      onBlur={() => saveTrackEdit(track.id)}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter') {
-                          saveTrackEdit(track.id);
-                        }
-                        if (e.key === 'Escape') {
-                          setEditingTrackId(null);
-                        }
-                      }}
-                      onClick={(e) => e.stopPropagation()}
-                    />
-                  ) : (
-                    <span
-                      className={`text-xs font-medium truncate cursor-text hover:text-blue-500 transition-colors ${selectedTrackId === track.id ? 'text-blue-600' : 'text-gray-700'}`}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        if (selectedTrackId === track.id) {
-                          startEditingTrack(track);
-                        } else {
-                          onTrackSelect(track.id);
-                        }
-                      }}
-                    >
-                      {track.name}
+            <Reorder.Group
+              axis="y"
+              values={tracks}
+              onReorder={onTracksReorder}
+              className="flex flex-col"
+            >
+              {tracks.map((track) => (
+                <Reorder.Item
+                  key={track.id}
+                  value={track}
+                  className="border-b border-gray-100 px-3 flex flex-col justify-center space-y-1 cursor-pointer transition-all hover:bg-gray-50 bg-white"
+                  style={{
+                    height: trackHeight,
+                    backgroundColor: selectedTrackId === track.id ? 'rgba(59, 130, 246, 0.05)' : 'transparent'
+                  }}
+                  onClick={() => onTrackSelect(track.id)}
+                >
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center space-x-2 overflow-hidden">
+                      <div className="cursor-grab active:cursor-grabbing p-0.5 text-gray-300 hover:text-gray-500 transition-colors">
+                        <GripVertical size={12} />
+                      </div>
+                      {editingTrackId === track.id ? (
+                        <input
+                          autoFocus
+                          className="bg-white/10 border-none outline-none text-xs font-medium text-blue-600 w-full rounded px-1"
+                          value={trackEditValue}
+                          onChange={(e) => setTrackEditValue(e.target.value)}
+                          onBlur={() => saveTrackEdit(track.id)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') {
+                              saveTrackEdit(track.id);
+                            }
+                            if (e.key === 'Escape') {
+                              setEditingTrackId(null);
+                            }
+                          }}
+                          onClick={(e) => e.stopPropagation()}
+                        />
+                      ) : (
+                        <span
+                          className={`text-xs font-medium truncate cursor-text hover:text-blue-500 transition-colors ${selectedTrackId === track.id ? 'text-blue-600' : 'text-gray-700'}`}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            if (selectedTrackId === track.id) {
+                              startEditingTrack(track);
+                            } else {
+                              onTrackSelect(track.id);
+                            }
+                          }}
+                        >
+                          {track.name}
+                        </span>
+                      )}
+                    </div>
+                    <div className={`flex items-center space-x-1 ${trackHeightMode === 'sm' ? 'scale-90 origin-right' : ''}`}>
+                      <button
+                        onClick={(e) => { e.stopPropagation(); onTrackUpdate(track.id, { isVisible: !track.isVisible }); }}
+                        className={`p-1 rounded hover:bg-gray-200 transition-colors ${track.isVisible ? 'text-gray-400' : 'text-blue-500'}`}
+                      >
+                        {track.isVisible ? <Eye size={12} /> : <EyeOff size={12} />}
+                      </button>
+                      <button
+                        onClick={(e) => { e.stopPropagation(); onTrackUpdate(track.id, { isLocked: !track.isLocked }); }}
+                        className={`p-1 rounded hover:bg-gray-200 transition-colors ${track.isLocked ? 'text-amber-500' : 'text-gray-400'}`}
+                      >
+                        {track.isLocked ? <Lock size={12} /> : <Unlock size={12} />}
+                      </button>
+                      {(track.type === TrackType.VIDEO || track.type === TrackType.AUDIO || track.type === TrackType.IMAGE || track.type === TrackType.SCREEN) && (
+                        <button
+                          onClick={(e) => { e.stopPropagation(); onTrackUpdate(track.id, { isArmed: !track.isArmed }); }}
+                          className={`p-1 rounded hover:bg-gray-200 transition-colors ${track.isArmed ? 'text-red-500' : 'text-gray-400'}`}
+                          title={track.isArmed ? "Disarm Track" : "Arm for Recording"}
+                        >
+                          <Radio size={12} className={track.isArmed ? "animate-pulse" : ""} />
+                        </button>
+                      )}
+                      {track.type === TrackType.AUDIO && (
+                        <button
+                          onClick={(e) => { e.stopPropagation(); onTrackUpdate(track.id, { isMuted: !track.isMuted }); }}
+                          className={`p-1 rounded hover:bg-gray-200 transition-colors ${track.isMuted ? 'text-red-500' : 'text-gray-400'}`}
+                        >
+                          {track.isMuted ? <VolumeX size={12} /> : <Volume2 size={12} />}
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                  <div className={`flex items-center space-x-2 ${trackHeightMode === 'sm' ? 'scale-90 origin-left' : ''}`}>
+                    <span className="text-[9px] px-1.5 py-0.5 rounded bg-gray-100 text-gray-500 uppercase font-bold">
+                      {track.type}
                     </span>
-                  )}
-                  <div className={`flex items-center space-x-1 ${trackHeightMode === 'sm' ? 'scale-90 origin-right' : ''}`}>
-                    <button
-                      onClick={(e) => { e.stopPropagation(); onTrackUpdate(track.id, { isVisible: !track.isVisible }); }}
-                      className={`p-1 rounded hover:bg-gray-200 transition-colors ${track.isVisible ? 'text-gray-400' : 'text-blue-500'}`}
-                    >
-                      {track.isVisible ? <Eye size={12} /> : <EyeOff size={12} />}
-                    </button>
-                    <button
-                      onClick={(e) => { e.stopPropagation(); onTrackUpdate(track.id, { isLocked: !track.isLocked }); }}
-                      className={`p-1 rounded hover:bg-gray-200 transition-colors ${track.isLocked ? 'text-amber-500' : 'text-gray-400'}`}
-                    >
-                      {track.isLocked ? <Lock size={12} /> : <Unlock size={12} />}
-                    </button>
-                    {(track.type === TrackType.VIDEO || track.type === TrackType.AUDIO) && (
+                    <div className="flex-1" />
+                    <div className="flex items-center space-x-1">
                       <button
-                        onClick={(e) => { e.stopPropagation(); onTrackUpdate(track.id, { isArmed: !track.isArmed }); }}
-                        className={`p-1 rounded hover:bg-gray-200 transition-colors ${track.isArmed ? 'text-red-500' : 'text-gray-400'}`}
-                        title={track.isArmed ? "Disarm Track" : "Arm for Recording"}
+                        onClick={(e) => { e.stopPropagation(); onTrackMove(track.id, 'up'); }}
+                        disabled={tracks.indexOf(track) === 0}
+                        className="p-1 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded transition-all disabled:opacity-20 disabled:cursor-not-allowed"
+                        title="Move Track Up"
                       >
-                        <Radio size={12} className={track.isArmed ? "animate-pulse" : ""} />
+                        <ChevronUp size={12} />
                       </button>
-                    )}
-                    {track.type === TrackType.AUDIO && (
                       <button
-                        onClick={(e) => { e.stopPropagation(); onTrackUpdate(track.id, { isMuted: !track.isMuted }); }}
-                        className={`p-1 rounded hover:bg-gray-200 transition-colors ${track.isMuted ? 'text-red-500' : 'text-gray-400'}`}
+                        onClick={(e) => { e.stopPropagation(); onTrackMove(track.id, 'down'); }}
+                        disabled={tracks.indexOf(track) === tracks.length - 1}
+                        className="p-1 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded transition-all disabled:opacity-20 disabled:cursor-not-allowed"
+                        title="Move Track Down"
                       >
-                        {track.isMuted ? <VolumeX size={12} /> : <Volume2 size={12} />}
+                        <ChevronDown size={12} />
                       </button>
-                    )}
-                  </div>
-                </div>
-                <div className={`flex items-center space-x-2 ${trackHeightMode === 'sm' ? 'scale-90 origin-left' : ''}`}>
-                  <span className="text-[9px] px-1.5 py-0.5 rounded bg-gray-100 text-gray-500 uppercase font-bold">
-                    {track.type}
-                  </span>
-                  <div className="flex-1" />
-                  <div className="flex items-center space-x-1">
+                    </div>
                     <button
-                      onClick={(e) => { e.stopPropagation(); onTrackMove(track.id, 'up'); }}
-                      disabled={tracks.indexOf(track) === 0}
-                      className="p-1 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded transition-all disabled:opacity-20 disabled:cursor-not-allowed"
-                      title="Move Track Up"
+                      onClick={(e) => { e.stopPropagation(); onTrackDuplicate(track.id); }}
+                      className="p-1 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded transition-all"
+                      title="Duplicate Track"
                     >
-                      <ChevronUp size={12} />
+                      <Copy size={10} />
                     </button>
                     <button
-                      onClick={(e) => { e.stopPropagation(); onTrackMove(track.id, 'down'); }}
-                      disabled={tracks.indexOf(track) === tracks.length - 1}
-                      className="p-1 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded transition-all disabled:opacity-20 disabled:cursor-not-allowed"
-                      title="Move Track Down"
+                      onClick={(e) => { e.stopPropagation(); onTrackDelete(track.id); }}
+                      className="p-1 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded transition-all"
+                      title="Delete Track"
                     >
-                      <ChevronDown size={12} />
+                      <Trash size={10} />
                     </button>
                   </div>
-                  <button
-                    onClick={(e) => { e.stopPropagation(); onTrackDuplicate(track.id); }}
-                    className="p-1 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded transition-all"
-                    title="Duplicate Track"
-                  >
-                    <Copy size={10} />
-                  </button>
-                  <button
-                    onClick={(e) => { e.stopPropagation(); onTrackDelete(track.id); }}
-                    className="p-1 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded transition-all"
-                    title="Delete Track"
-                  >
-                    <Trash size={10} />
-                  </button>
-                </div>
-              </div>
-            ))}
+                </Reorder.Item>
+              ))}
+            </Reorder.Group>
             {/* redundant section removed
             <div className="p-3">
               <div className="grid grid-cols-2 gap-2">
@@ -789,15 +811,17 @@ export const Timeline: React.FC<TimelineProps> = ({
                 {tracks.map((track) => (
                   <div
                     key={track.id}
-                    className={`relative border-b border-gray-200/50 transition-all ${selectedTrackId === track.id ? 'bg-blue-50/20' : ''}`}
+                    className={`relative border-b border-gray-200/50 transition-all ${selectedTrackId === track.id ? 'bg-blue-50/20' : ''} ${track.isLocked ? 'bg-gray-100/5' : ''}`}
                     style={{ height: trackHeight }}
                     onDoubleClick={(e) => {
+                      if (track.isLocked) return;
                       if (track.type === TrackType.TEXT || track.type === TrackType.SUBTITLE) {
                         const rect = e.currentTarget.getBoundingClientRect();
-                        const x = e.clientX - rect.left + (tracksScrollRef.current?.scrollLeft || 0);
-                        const startTime = x / pixelsPerSecond;
+                        const x = e.clientX - rect.left;
+                        const startTime = snapToFrame(x / pixelsPerSecond);
+                        onTimeChange(startTime);
                         onTrackSelect(track.id);
-                        onAddTextClip?.(track.type as TrackType.TEXT | TrackType.SUBTITLE, startTime);
+                        onAddTextClip?.(track.type as TrackType.TEXT | TrackType.SUBTITLE, startTime, track.id);
                       }
                     }}
                   >
@@ -824,8 +848,9 @@ export const Timeline: React.FC<TimelineProps> = ({
                       return (
                         <div
                           key={clip.id}
-                          className={`absolute top-2 bg-black rounded-md border-2 overflow-hidden group shadow-lg cursor-grab active:cursor-grabbing transition-[border-color,transform,shadow,ring] ${draggingClipId === clip.id ? 'border-blue-500 z-40 scale-[1.02] shadow-blue-500/30 !transition-none' :
-                            isSelected ? 'border-blue-500 z-30 shadow-blue-500/40 ring-2 ring-blue-500/20' : 'border-gray-800'
+                          className={`absolute top-2 bg-black rounded-md border-2 overflow-hidden group shadow-lg transition-[border-color,transform,shadow,ring] ${track.isLocked ? 'border-gray-700 opacity-60 cursor-not-allowed grayscale-[0.5]' :
+                            draggingClipId === clip.id ? 'border-blue-500 z-40 scale-[1.02] shadow-blue-500/30 !transition-none cursor-grabbing' :
+                              isSelected ? 'border-blue-500 z-30 shadow-blue-500/40 ring-2 ring-blue-500/20 cursor-grab' : 'border-gray-800 cursor-grab active:cursor-grabbing'
                             }`}
                           style={{
                             left: start * pixelsPerSecond,
@@ -833,6 +858,7 @@ export const Timeline: React.FC<TimelineProps> = ({
                             height: trackHeight - 16
                           }}
                           onMouseDown={(e) => {
+                            if (track.isLocked) return;
                             e.stopPropagation();
                             e.preventDefault();
 
@@ -851,10 +877,12 @@ export const Timeline: React.FC<TimelineProps> = ({
                             onManipulationStart?.();
                           }}
                           onDoubleClick={(e) => {
+                            if (track.isLocked) return;
                             e.stopPropagation();
                             startEditing(clip);
                           }}
                           onKeyDown={(e) => {
+                            if (track.isLocked) return;
                             if (e.key === 'Enter' && selectedClipIds.includes(clip.id) && editingClipId === null) {
                               e.stopPropagation();
                               startEditing(clip);
@@ -862,7 +890,12 @@ export const Timeline: React.FC<TimelineProps> = ({
                           }}
                           tabIndex={0}
                         >
-                          {clip.type === TrackType.VIDEO || clip.type === TrackType.IMAGE ? (
+                          {track.isLocked && (
+                            <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/20 pointer-events-none">
+                              <Lock size={16} className="text-white/40" />
+                            </div>
+                          )}
+                          {clip.type === TrackType.VIDEO || clip.type === TrackType.IMAGE || clip.type === TrackType.SCREEN ? (
                             <ThumbnailStrip
                               videoUrl={clip.videoUrl || clip.thumbnailUrl || ''}
                               duration={clip.duration}
@@ -923,8 +956,9 @@ export const Timeline: React.FC<TimelineProps> = ({
                             }`} />
 
                           <div
-                            className="absolute left-0 top-0 bottom-0 w-2 bg-blue-500/0 group-hover:bg-blue-500/40 cursor-col-resize z-50 transition-colors"
+                            className={`absolute left-0 top-0 bottom-0 w-2 bg-blue-500/0 ${track.isLocked ? '' : 'group-hover:bg-blue-500/40 cursor-col-resize'} z-50 transition-colors`}
                             onMouseDown={(e) => {
+                              if (track.isLocked) return;
                               e.stopPropagation();
                               handleClipSelection(e, clip.id);
                               setTrimmingClipId({ id: clip.id, side: 'left' });
@@ -932,8 +966,9 @@ export const Timeline: React.FC<TimelineProps> = ({
                             }}
                           />
                           <div
-                            className="absolute right-0 top-0 bottom-0 w-2 bg-blue-500/0 group-hover:bg-blue-500/40 cursor-col-resize z-50 transition-colors"
+                            className={`absolute right-0 top-0 bottom-0 w-2 bg-blue-500/0 ${track.isLocked ? '' : 'group-hover:bg-blue-500/40 cursor-col-resize'} z-50 transition-colors`}
                             onMouseDown={(e) => {
+                              if (track.isLocked) return;
                               e.stopPropagation();
                               handleClipSelection(e, clip.id);
                               setTrimmingClipId({ id: clip.id, side: 'right' });
@@ -1029,6 +1064,13 @@ export const Timeline: React.FC<TimelineProps> = ({
                 title="Add Image Track"
               >
                 + Img
+              </button>
+              <button
+                onClick={() => onAddTrack(TrackType.SCREEN)}
+                className="px-2 py-1 text-[10px] font-bold uppercase hover:bg-white rounded transition-all"
+                title="Add Screen Track"
+              >
+                + Screen
               </button>
             </div>
 
