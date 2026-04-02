@@ -2,6 +2,70 @@ import React, { useState, useRef } from 'react';
 import { motion } from 'motion/react';
 import { X, Download, Loader2, CheckCircle2, AlertCircle } from 'lucide-react';
 import { VideoObjType, Track, TrackType, VideoClip } from '../types';
+import { Muxer as WebMMuxer, ArrayBufferTarget as WebMArrayBufferTarget } from 'webm-muxer';
+import { Muxer as MP4Muxer, ArrayBufferTarget as MP4ArrayBufferTarget } from 'mp4-muxer';
+
+// WebGPU Shader for Compositing
+const COMPOSITE_SHADER = `
+  struct VertexOutput {
+    @builtin(position) position: vec4<f32>,
+    @location(0) texCoord: vec2<f32>,
+  };
+
+  struct Uniforms {
+    transform: mat3x3<f32>,
+    opacity: f32,
+    crop: vec4<f32>, // top, right, bottom, left
+  };
+
+  @group(0) @binding(0) var<uniform> u: Uniforms;
+
+  @vertex
+  fn vs_main(@builtin(vertex_index) vertexIndex: u32) -> VertexOutput {
+    var pos = array<vec2<f32>, 4>(
+      vec2<f32>(-1.0,  1.0),
+      vec2<f32>( 1.0,  1.0),
+      vec2<f32>(-1.0, -1.0),
+      vec2<f32>( 1.0, -1.0)
+    );
+    var tex = array<vec2<f32>, 4>(
+      vec2<f32>(0.0, 0.0),
+      vec2<f32>(1.0, 0.0),
+      vec2<f32>(0.0, 1.0),
+      vec2<f32>(1.0, 1.0)
+    );
+
+    var out: VertexOutput;
+    // Apply transform matrix (simplified for 2D)
+    let p = u.transform * vec3<f32>(pos[vertexIndex], 1.0);
+    out.position = vec4<f32>(p.xy, 0.0, 1.0);
+    
+    // Apply crop to texture coordinates
+    let tc = tex[vertexIndex];
+    let croppedTC = vec2<f32>(
+      u.crop.w / 100.0 + tc.x * (1.0 - (u.crop.w + u.crop.y) / 100.0),
+      u.crop.x / 100.0 + tc.y * (1.0 - (u.crop.x + u.crop.z) / 100.0)
+    );
+    out.texCoord = croppedTC;
+    return out;
+  }
+
+  @group(0) @binding(1) var s: sampler;
+  @group(0) @binding(2) var t_ext: texture_external;
+  @group(0) @binding(3) var t_2d: texture_2d<f32>;
+  @group(0) @binding(4) var<uniform> is_external: u32;
+
+  @fragment
+  fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    var color: vec4<f32>;
+    if (is_external == 1u) {
+      color = textureSampleBaseClampToEdge(t_ext, s, in.texCoord);
+    } else {
+      color = textureSample(t_2d, s, in.texCoord);
+    }
+    return vec4<f32>(color.rgb, color.a * u.opacity);
+  }
+`;
 
 interface ExportDialogProps {
   clips: VideoObjType;
@@ -53,256 +117,535 @@ export const ExportDialog: React.FC<ExportDialogProps> = ({ clips, tracks, total
       // 1. Preload all required videos and images
       const visibleTrackIds = tracks.filter(t => t.isVisible).map(t => t.id);
       const exportClips = clips.filter(c => visibleTrackIds.includes(c.trackId));
-
-      await Promise.all(exportClips.map(async (clip) => {
-        if (clip.type === TrackType.VIDEO || clip.type === TrackType.AUDIO) {
-          const video = document.createElement('video');
-          video.src = clip.videoUrl!;
-          video.muted = true;
-          video.playsInline = true;
-          video.crossOrigin = 'anonymous';
-          // Pre-load enough to get metadata
-          await new Promise((resolve, reject) => {
-            video.onloadedmetadata = resolve;
-            video.onerror = reject;
-          });
-          videoElementsRef.current[clip.id] = video;
-        } else if (clip.type === TrackType.IMAGE) {
-          const img = new Image();
-          img.src = clip.thumbnailUrl!;
-          img.crossOrigin = 'anonymous';
-          await new Promise((resolve, reject) => {
-            img.onload = resolve;
-            img.onerror = reject;
-          });
-          imageElementsRef.current[clip.id] = img;
-        }
-      }));
-
-      // 2. Setup MediaRecorder
-      const mimeType = format === 'mp4' 
-        ? (MediaRecorder.isTypeSupported('video/mp4;codecs=avc1') ? 'video/mp4;codecs=avc1' : 'video/mp4')
-        : 'video/webm;codecs=vp9,opus';
-      
-      // Setup Audio
-      const audioCtx = new AudioContext();
-      const dest = audioCtx.createMediaStreamDestination();
-      
-      // Connect all audio clips
-      exportClips.forEach(clip => {
-        if (clip.type === TrackType.AUDIO || clip.type === TrackType.VIDEO) {
-          const video = videoElementsRef.current[clip.id];
-          const track = tracks.find(t => t.id === clip.trackId);
-          if (video && track && !track.isMuted) {
-            video.muted = false;
-            const source = audioCtx.createMediaElementSource(video);
-            source.connect(dest);
-          }
-        }
-      });
-
-      let recorder: MediaRecorder;
-      let writer: WritableStreamDefaultWriter<VideoFrame> | null = null;
-
-      // Use MediaStreamTrackGenerator for deterministic timing if supported
-      if ('MediaStreamTrackGenerator' in window && 'VideoFrame' in window) {
-        const trackGenerator = new (window as any).MediaStreamTrackGenerator({ kind: 'video' });
-        writer = trackGenerator.writable.getWriter();
-        
-        const combinedStream = new MediaStream([
-          trackGenerator,
-          ...dest.stream.getAudioTracks()
-        ]);
-
-        recorder = new MediaRecorder(combinedStream, {
-          mimeType,
-          videoBitsPerSecond: 8000000
-        });
-      } else {
-        // Fallback to canvas capture stream (less accurate duration)
-        const stream = canvas.captureStream(30);
-        const combinedStream = new MediaStream([
-          ...stream.getVideoTracks(),
-          ...dest.stream.getAudioTracks()
-        ]);
-
-        recorder = new MediaRecorder(combinedStream, {
-          mimeType,
-          videoBitsPerSecond: 8000000
-        });
-      }
-
-      recorder.ondataavailable = (e) => {
-        if (e.data.size > 0) chunksRef.current.push(e.data);
-      };
-
-      recorder.onstop = () => {
-        const blob = new Blob(chunksRef.current, { type: format === 'mp4' ? 'video/mp4' : 'video/webm' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `sequence-export-${Date.now()}.${format}`;
-        a.click();
-        setStatus('completed');
-      };
-
-      recorder.start(100);
-      // Give the recorder a moment to initialize
-      await new Promise(resolve => setTimeout(resolve, 500));
-
-      // 3. Render loop
-      const fps = 30;
-      const frameDuration = 1 / fps;
       const exportDuration = Math.round((exportRange.end - exportRange.start) * 30) / 30;
-      
+
       if (exportDuration <= 0) {
         throw new Error("Invalid export range. Duration must be greater than 0.");
       }
 
-      const totalFrames = Math.round(exportDuration * fps);
-      console.log(`[Export] Start: ${exportRange.start}s, End: ${exportRange.end}s`);
-      console.log(`[Export] Duration: ${exportDuration}s, Total Frames: ${totalFrames}`);
-      console.log(`[Export] Using MediaStreamTrackGenerator: ${!!writer}`);
+      // Preload visual elements
+      console.log("[Export] Preloading visual elements...");
+      await Promise.all(exportClips.map(async (clip, index) => {
+        try {
+          if (clip.type === TrackType.VIDEO || clip.type === TrackType.AUDIO) {
+            const video = document.createElement('video');
+            video.src = clip.videoUrl!;
+            video.muted = true;
+            video.playsInline = true;
+            video.crossOrigin = 'anonymous';
+            
+            await new Promise((resolve, reject) => {
+              const timeout = setTimeout(() => resolve(null), 5000); // 5s timeout for metadata
+              video.onloadedmetadata = () => { clearTimeout(timeout); resolve(null); };
+              video.onerror = () => { clearTimeout(timeout); resolve(null); }; // Continue even on error
+            });
+            videoElementsRef.current[clip.id] = video;
+          } else if (clip.type === TrackType.IMAGE) {
+            const img = new Image();
+            img.src = clip.thumbnailUrl!;
+            img.crossOrigin = 'anonymous';
+            await new Promise((resolve) => {
+              const timeout = setTimeout(() => resolve(null), 5000);
+              img.onload = () => { clearTimeout(timeout); resolve(null); };
+              img.onerror = () => { clearTimeout(timeout); resolve(null); };
+            });
+            imageElementsRef.current[clip.id] = img;
+          }
+          // Update progress slightly during preloading
+          setProgress((index / exportClips.length) * 5); 
+        } catch (e) {
+          console.warn(`[Export] Failed to preload clip ${clip.id}:`, e);
+        }
+      }));
 
-      const exportStartTime = Date.now();
+      // 2. Setup Audio (Offline Rendering for perfect sync)
+      const audioCtx = new AudioContext();
+      if (audioCtx.state === 'suspended') await audioCtx.resume();
+      
+      const sampleRate = 44100;
+      const offlineCtx = new OfflineAudioContext(2, Math.max(1, Math.ceil(exportDuration * sampleRate)), sampleRate);
+      
+      console.log(`[Export] Pre-rendering audio for ${exportDuration}s...`);
+      
+      await Promise.all(exportClips.map(async (clip) => {
+        if ((clip.type === TrackType.AUDIO || clip.type === TrackType.VIDEO) && clip.videoUrl) {
+          try {
+            const response = await fetch(clip.videoUrl);
+            if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+            const arrayBuffer = await response.arrayBuffer();
+            const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+            
+            const source = offlineCtx.createBufferSource();
+            source.buffer = audioBuffer;
+            
+            const gainNode = offlineCtx.createGain();
+            const track = tracks.find(t => t.id === clip.trackId);
+            gainNode.gain.value = (track?.isMuted) ? 0 : (clip.volume !== undefined ? clip.volume : 1);
+            
+            source.connect(gainNode);
+            gainNode.connect(offlineCtx.destination);
+            
+            // Calculate timing relative to export range
+            const clipStartInExport = Math.max(0, clip.timelinePosition.start - exportRange.start);
+            const clipEndInExport = Math.min(exportDuration, clip.timelinePosition.end - exportRange.start);
+            
+            if (clipStartInExport < exportDuration && clipEndInExport > 0) {
+              const offset = clip.sourceStart + (clip.timelinePosition.start < exportRange.start ? (exportRange.start - clip.timelinePosition.start) : 0);
+              const duration = clipEndInExport - clipStartInExport;
+              if (duration > 0) {
+                source.start(clipStartInExport, offset, duration);
+              }
+            }
+          } catch (e) {
+            console.warn(`[Export] Failed to process audio for clip ${clip.id}:`, e);
+          }
+        }
+      }));
+
+      setProgress(8); // Initialization progress
+      const renderedAudioBuffer = await offlineCtx.startRendering();
+      console.log("[Export] Audio pre-rendering complete.");
+      setProgress(10);
+
+      // 3. Setup Export Method (Industry Standard: WebCodecs + Muxer + WebGPU)
+      const isWebCodecsSupported = 'VideoEncoder' in window && 'AudioEncoder' in window && 'VideoFrame' in window;
+      const isWebGPUSupported = 'gpu' in navigator;
+      
+      if (!isWebCodecsSupported) {
+        throw new Error("Your browser does not support WebCodecs. Please use a modern browser like Chrome or Edge.");
+      }
+
+      console.log(`[Export] Using WebCodecs + ${format === 'mp4' ? 'mp4-muxer' : 'webm-muxer'} for Deterministic Export`);
+      if (isWebGPUSupported) console.log("[Export] WebGPU acceleration enabled.");
+
+      // Initialize WebGPU if supported
+      let gpuDevice: any = null;
+      let gpuPipeline: any = null;
+      let gpuSampler: any = null;
+      let gpuCanvas: any = null;
+      let gpuContext: any = null;
+      let dummyTexture: any = null;
+      let externalTrueBuffer: any = null;
+      let externalFalseBuffer: any = null;
+      
+      if (isWebGPUSupported) {
+        try {
+          const adapter = await (navigator as any).gpu.requestAdapter();
+          if (adapter) {
+            gpuDevice = await adapter.requestDevice();
+            gpuCanvas = new OffscreenCanvas(1280, 720);
+            gpuContext = gpuCanvas.getContext('webgpu');
+            
+            if (gpuContext) {
+              gpuContext.configure({
+                device: gpuDevice,
+                format: 'bgra8unorm',
+                alphaMode: 'premultiplied'
+              });
+
+              const shaderModule = gpuDevice.createShaderModule({ code: COMPOSITE_SHADER });
+              gpuPipeline = gpuDevice.createRenderPipeline({
+                layout: 'auto',
+                vertex: { module: shaderModule, entryPoint: 'vs_main' },
+                fragment: {
+                  module: shaderModule,
+                  entryPoint: 'fs_main',
+                  targets: [{
+                    format: 'bgra8unorm',
+                    blend: {
+                      color: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha', operation: 'add' },
+                      alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' }
+                    }
+                  }]
+                },
+                primitive: { topology: 'triangle-strip' }
+              });
+              gpuSampler = gpuDevice.createSampler({ magFilter: 'linear', minFilter: 'linear' });
+              
+              // Create a reusable dummy texture for binding 3 when using external textures
+              dummyTexture = gpuDevice.createTexture({ 
+                size: [1, 1], 
+                format: 'rgba8unorm', 
+                usage: (window as any).GPUTextureUsage.TEXTURE_BINDING 
+              });
+
+              // Pre-create constant buffers for isExternal flag
+              externalTrueBuffer = gpuDevice.createBuffer({ size: 4, usage: (window as any).GPUBufferUsage.UNIFORM | (window as any).GPUBufferUsage.COPY_DST, mappedAtCreation: true });
+              new Uint32Array(externalTrueBuffer.getMappedRange())[0] = 1;
+              externalTrueBuffer.unmap();
+
+              externalFalseBuffer = gpuDevice.createBuffer({ size: 4, usage: (window as any).GPUBufferUsage.UNIFORM | (window as any).GPUBufferUsage.COPY_DST, mappedAtCreation: true });
+              new Uint32Array(externalFalseBuffer.getMappedRange())[0] = 0;
+              externalFalseBuffer.unmap();
+
+              console.log("[Export] WebGPU initialized successfully");
+            }
+          }
+        } catch (e) {
+          console.warn("[Export] WebGPU initialization failed, falling back to Canvas2D:", e);
+          gpuDevice = null;
+        }
+      }
+
+      const muxer = format === 'mp4' ? new MP4Muxer({
+        target: new MP4ArrayBufferTarget(),
+        video: { codec: 'avc', width: 1280, height: 720 },
+        audio: { codec: 'aac', sampleRate: sampleRate, numberOfChannels: 2 },
+        fastStart: 'in-memory'
+      }) : new WebMMuxer({
+        target: new WebMArrayBufferTarget(),
+        video: { codec: 'V_VP9', width: 1280, height: 720, frameRate: 30 },
+        audio: { codec: 'A_OPUS', sampleRate: sampleRate, numberOfChannels: 2 }
+      });
+
+      const videoEncoder = new VideoEncoder({
+        output: (chunk, metadata) => muxer.addVideoChunk(chunk, metadata),
+        error: (e) => {
+          console.error("[Export] VideoEncoder error:", e);
+          setError(`Video encoding error: ${e.message}`);
+          setStatus('error');
+        }
+      });
+
+      const audioEncoder = new AudioEncoder({
+        output: (chunk, metadata) => muxer.addAudioChunk(chunk, metadata),
+        error: (e) => {
+          console.error("[Export] AudioEncoder error:", e);
+          setError(`Audio encoding error: ${e.message}`);
+          setStatus('error');
+        }
+      });
+
+      if (format === 'mp4') {
+        videoEncoder.configure({
+          codec: 'avc1.42E01F',
+          width: 1280,
+          height: 720,
+          bitrate: 12000000,
+          framerate: 30,
+          latencyMode: 'quality'
+        });
+        audioEncoder.configure({
+          codec: 'mp4a.40.2',
+          sampleRate: sampleRate,
+          numberOfChannels: 2,
+          bitrate: 128000
+        });
+      } else {
+        videoEncoder.configure({
+          codec: 'vp09.00.10.08',
+          width: 1280,
+          height: 720,
+          bitrate: 12000000,
+          framerate: 30,
+          latencyMode: 'quality'
+        });
+        audioEncoder.configure({
+          codec: 'opus',
+          sampleRate: sampleRate,
+          numberOfChannels: 2,
+          bitrate: 128000
+        });
+      }
+
+      // 4. Render loop with Pipelined Seeking
+      const fps = 30;
+      const frameDuration = 1 / fps;
+      const totalFrames = Math.round(exportDuration * fps);
+      
+      console.log(`[Export] Starting render: ${totalFrames} frames`);
+
+      // Helper for seeking a single clip with promise caching to avoid redundant seeks
+      const activeSeeks = new Map<number, Promise<void>>();
+      const seekClip = (clip: VideoClip, time: number) => {
+        const video = videoElementsRef.current[clip.id];
+        if (!video) return Promise.resolve();
+        
+        const localTime = (time - clip.timelinePosition.start) + clip.sourceStart;
+        const seekKey = clip.id;
+        
+        // If already seeking to this time, return the existing promise
+        // We check currentTime to see if we actually need to seek
+        if (Math.abs(video.currentTime - localTime) < 0.001) {
+          return Promise.resolve();
+        }
+
+        const seekPromise = new Promise<void>(resolve => {
+          let resolved = false;
+          const timeout = setTimeout(() => { 
+            if (!resolved) { 
+              resolved = true; 
+              activeSeeks.delete(seekKey);
+              resolve(); 
+            } 
+          }, 1000);
+
+          const onSeeked = () => {
+            if (resolved) return;
+            resolved = true;
+            clearTimeout(timeout);
+            activeSeeks.delete(seekKey);
+            
+            // If tab is hidden, resolve immediately as rAF/rVFC won't fire
+            if (document.visibilityState === 'hidden') {
+              resolve();
+              return;
+            }
+
+            if ('requestVideoFrameCallback' in video) {
+              (video as any).requestVideoFrameCallback(() => resolve());
+              // Safety timeout for rVFC
+              setTimeout(() => resolve(), 100);
+            } else {
+              requestAnimationFrame(() => resolve());
+              // Safety timeout for rAF
+              setTimeout(() => resolve(), 100);
+            }
+          };
+          video.addEventListener('seeked', onSeeked, { once: true });
+          video.currentTime = localTime;
+        });
+
+        activeSeeks.set(seekKey, seekPromise);
+        return seekPromise;
+      };
+
+      // Start pre-seeking first frame
+      const firstFrameTime = exportRange.start;
+      const firstActiveClips = exportClips.filter(c => firstFrameTime >= c.timelinePosition.start && firstFrameTime < c.timelinePosition.end);
+      await Promise.all(firstActiveClips.filter(c => c.type === TrackType.VIDEO).map(c => seekClip(c as VideoClip, firstFrameTime)));
 
       for (let i = 0; i < totalFrames; i++) {
-        // Calculate precise time for this frame, snapped to 30fps grid
-        const actualTime = Math.round((exportRange.start + i * frameDuration) * 30) / 30;
+        const frameTime = i * frameDuration;
+        const actualTime = Math.round((exportRange.start + frameTime) * 100) / 100;
         
+        // Progress starts from 10% and goes to 100%
         if (i % 30 === 0 || i === totalFrames - 1) {
-          console.log(`[Export] Rendering frame ${i + 1}/${totalFrames} at ${actualTime.toFixed(3)}s`);
+          setProgress(10 + ((i + 1) / totalFrames) * 90);
+        }
+
+        // 4a. Prefetch next frame's seeks while rendering current
+        if (i < totalFrames - 1) {
+          const nextActualTime = Math.round((exportRange.start + (i + 1) * frameDuration) * 100) / 100;
+          const nextActiveClips = exportClips.filter(c => nextActualTime >= c.timelinePosition.start && nextActualTime < c.timelinePosition.end);
+          // Trigger seeks in background (don't await yet)
+          nextActiveClips.filter(c => c.type === TrackType.VIDEO).forEach(c => seekClip(c as VideoClip, nextActualTime));
         }
         
-        // Clear offscreen canvas
+        // 4b. Composite Frame
         offscreenCtx.fillStyle = '#000000';
         offscreenCtx.fillRect(0, 0, offscreenCanvas.width, offscreenCanvas.height);
 
-        // Find active clips at this time
-        const activeClips = exportClips.filter(c => 
-          actualTime >= c.timelinePosition.start && 
-          actualTime <= c.timelinePosition.end
-        ).sort((a, b) => {
-          const indexA = tracks.findIndex(t => t.id === a.trackId);
-          const indexB = tracks.findIndex(t => t.id === b.trackId);
-          return indexB - indexA; 
-        });
+        const activeClips = exportClips.filter(c => actualTime >= c.timelinePosition.start && actualTime < c.timelinePosition.end)
+          .sort((a, b) => {
+            const indexA = tracks.findIndex(t => t.id === a.trackId);
+            const indexB = tracks.findIndex(t => t.id === b.trackId);
+            return indexB - indexA; // Draw higher index (bottom) tracks first
+          });
 
-        // Draw each clip to offscreen canvas
+        const gpuRenderedClips = new Set<number>();
+        if (gpuDevice && gpuPipeline && gpuSampler && gpuContext) {
+          // WebGPU Path for Video Layers
+          const commandEncoder = gpuDevice.createCommandEncoder();
+          const renderPass = commandEncoder.beginRenderPass({
+            colorAttachments: [{
+              view: gpuContext.getCurrentTexture().createView(),
+              clearValue: { r: 0, g: 0, b: 0, a: 0 }, 
+              loadOp: 'clear',
+              storeOp: 'store'
+            }]
+          });
+          renderPass.setPipeline(gpuPipeline);
+
+          let hasGpuVideo = false;
+          for (const clip of activeClips) {
+            if (clip.type !== TrackType.VIDEO) continue;
+
+            const track = tracks.find(t => t.id === clip.trackId);
+            if (!track || !track.isVisible) continue;
+
+            const transform = { position: { x: 0, y: 0 }, rotation: 0, flipHorizontal: false, flipVertical: false, scale: { x: 1, y: 1 }, opacity: 1, crop: { top: 0, right: 0, bottom: 0, left: 0 }, ...(clip.transform || {}) };
+            const rotation = (typeof transform.rotation === 'number' ? transform.rotation : (transform.rotation as any)?.z || 0) * Math.PI / 180;
+
+            const cos = Math.cos(rotation);
+            const sin = Math.sin(rotation);
+            const sx = (transform.scale?.x || 1) * (transform.flipHorizontal ? -1 : 1);
+            const sy = (transform.scale?.y || 1) * (transform.flipVertical ? -1 : 1);
+            const tx = (transform.position.x || 0) / 640; 
+            const ty = -(transform.position.y || 0) / 360; 
+
+            const uniformData = new Float32Array(12 + 4 + 4); 
+            uniformData[0] = sx * cos; uniformData[1] = sx * sin; uniformData[2] = 0;
+            uniformData[4] = -sy * sin; uniformData[5] = sy * cos; uniformData[6] = 0;
+            uniformData[8] = tx; uniformData[9] = ty; uniformData[10] = 1;
+            uniformData[12] = transform.opacity;
+            const crop = transform.crop || { top: 0, right: 0, bottom: 0, left: 0 };
+            uniformData.set([crop.top, crop.right, crop.bottom, crop.left], 16);
+
+            const uniformBuffer = gpuDevice.createBuffer({
+              size: uniformData.byteLength,
+              usage: (window as any).GPUBufferUsage.UNIFORM | (window as any).GPUBufferUsage.COPY_DST,
+              mappedAtCreation: true
+            });
+            new Float32Array(uniformBuffer.getMappedRange()).set(uniformData);
+            uniformBuffer.unmap();
+
+            const video = videoElementsRef.current[clip.id];
+            if (video && video.readyState >= 2 && video.videoWidth > 0) {
+              try {
+                const videoTexture = gpuDevice.importExternalTexture({ source: video });
+                const bindGroup = gpuDevice.createBindGroup({
+                  layout: gpuPipeline.getBindGroupLayout(0),
+                  entries: [
+                    { binding: 0, resource: { buffer: uniformBuffer } },
+                    { binding: 1, resource: gpuSampler },
+                    { binding: 2, resource: videoTexture },
+                    { binding: 3, resource: dummyTexture.createView() },
+                    { binding: 4, resource: { buffer: externalTrueBuffer } }
+                  ]
+                });
+
+                renderPass.setBindGroup(0, bindGroup);
+                renderPass.draw(4);
+                gpuRenderedClips.add(clip.id);
+                hasGpuVideo = true;
+              } catch (e) {
+                console.warn("[Export] GPU Video Import failed:", e);
+              }
+            }
+          }
+          renderPass.end();
+          gpuDevice.queue.submit([commandEncoder.finish()]);
+
+          if (hasGpuVideo) {
+            offscreenCtx.drawImage(gpuCanvas, 0, 0);
+          }
+        }
+
+        // 2D Path for non-video layers (and video if GPU failed or skipped)
         for (const clip of activeClips) {
+          if (gpuRenderedClips.has(clip.id)) continue;
+
           const track = tracks.find(t => t.id === clip.trackId);
           if (!track || !track.isVisible) continue;
+          
+          const transform = { position: { x: 0, y: 0 }, rotation: 0, flipHorizontal: false, flipVertical: false, scale: { x: 1, y: 1 }, opacity: 1, crop: { top: 0, right: 0, bottom: 0, left: 0 }, ...(clip.transform || {}) };
+          const rotation = typeof transform.rotation === 'number' ? transform.rotation : (transform.rotation as any)?.z || 0;
+
+          offscreenCtx.save();
+          offscreenCtx.globalAlpha = transform.opacity;
+          offscreenCtx.translate((transform.position.x || 0) + 640, (transform.position.y || 0) + 360);
+          offscreenCtx.rotate(rotation * Math.PI / 180);
+          offscreenCtx.scale((transform.scale?.x || 1) * (transform.flipHorizontal ? -1 : 1), (transform.scale?.y || 1) * (transform.flipVertical ? -1 : 1));
 
           if (clip.type === TrackType.VIDEO) {
             const video = videoElementsRef.current[clip.id];
-            if (video) {
-              const localTime = (actualTime - clip.timelinePosition.start) + clip.sourceStart;
-              video.currentTime = localTime;
-              
-              // Wait for seek and ensure frame is ready
-              await new Promise(resolve => {
-                const onSeeked = () => {
-                  video.removeEventListener('seeked', onSeeked);
-                  if (video.readyState >= 2) {
-                    resolve(null);
-                  } else {
-                    video.addEventListener('canplay', () => resolve(null), { once: true });
-                  }
-                };
-                video.addEventListener('seeked', onSeeked);
-                // Safety timeout
-                setTimeout(resolve, 150);
-              });
-              
-              offscreenCtx.drawImage(video, 0, 0, offscreenCanvas.width, offscreenCanvas.height);
+            if (video && video.videoWidth > 0) {
+              const crop = transform.crop || { top: 0, right: 0, bottom: 0, left: 0 };
+              const sx = (crop.left / 100) * video.videoWidth;
+              const sy = (crop.top / 100) * video.videoHeight;
+              const sw = video.videoWidth * (1 - (crop.left + crop.right) / 100);
+              const sh = video.videoHeight * (1 - (crop.top + crop.bottom) / 100);
+              offscreenCtx.drawImage(video, sx, sy, sw, sh, -640, -360, 1280, 720);
             }
           } else if (clip.type === TrackType.IMAGE) {
             const img = imageElementsRef.current[clip.id];
             if (img) {
-              offscreenCtx.drawImage(img, 0, 0, offscreenCanvas.width, offscreenCanvas.height);
+              const crop = transform.crop || { top: 0, right: 0, bottom: 0, left: 0 };
+              const sx = (crop.left / 100) * img.width;
+              const sy = (crop.top / 100) * img.height;
+              const sw = img.width * (1 - (crop.left + crop.right) / 100);
+              const sh = img.height * (1 - (crop.top + crop.bottom) / 100);
+              offscreenCtx.drawImage(img, sx, sy, sw, sh, -640, -360, 1280, 720);
             }
           } else if (clip.type === TrackType.TEXT || clip.type === TrackType.SUBTITLE) {
-            offscreenCtx.save();
-            const posX = (clip.style?.position?.x || 0) + offscreenCanvas.width / 2;
-            const posY = (clip.style?.position?.y || 0) + offscreenCanvas.height / 2;
-            const scale = clip.style?.scale || 1;
-            const rotation = (clip.style?.rotation || 0) * Math.PI / 180;
-
-            offscreenCtx.translate(posX, posY);
-            offscreenCtx.scale(scale, scale);
-            offscreenCtx.rotate(rotation);
-
             const fontSize = clip.style?.fontSize || 48;
             offscreenCtx.font = `${clip.style?.fontWeight || 'normal'} ${fontSize}px ${clip.style?.fontFamily || 'sans-serif'}`;
             offscreenCtx.fillStyle = clip.style?.color || '#ffffff';
             offscreenCtx.textAlign = 'center';
             offscreenCtx.textBaseline = 'middle';
-
-            if (clip.type === TrackType.SUBTITLE) {
+            if (clip.type === TrackType.SUBTITLE || (clip.style?.backgroundColor && clip.style.backgroundColor !== 'transparent')) {
               const textWidth = offscreenCtx.measureText(clip.content || '').width;
-              offscreenCtx.fillStyle = 'rgba(0,0,0,0.6)';
-              offscreenCtx.fillRect(-textWidth/2 - 20, -fontSize/2 - 10, textWidth + 40, fontSize + 20);
-              offscreenCtx.fillStyle = clip.style?.color || '#ffffff';
-            } else if (clip.style?.backgroundColor && clip.style.backgroundColor !== 'transparent') {
-              const textWidth = offscreenCtx.measureText(clip.content || '').width;
-              offscreenCtx.fillStyle = clip.style.backgroundColor;
+              offscreenCtx.fillStyle = clip.style?.backgroundColor || 'rgba(0,0,0,0.6)';
               offscreenCtx.fillRect(-textWidth/2 - 20, -fontSize/2 - 10, textWidth + 40, fontSize + 20);
               offscreenCtx.fillStyle = clip.style?.color || '#ffffff';
             }
-
             offscreenCtx.fillText(clip.content || '', 0, 0);
-            offscreenCtx.restore();
           }
+          offscreenCtx.restore();
         }
 
-        // Copy offscreen to main canvas in ONE operation to prevent flickering
+        // Update main canvas for preview
         ctx.drawImage(offscreenCanvas, 0, 0);
-
-        // Push frame to generator if available
-        if (writer) {
-          const frame = new VideoFrame(canvas, { 
-            timestamp: (i * frameDuration) * 1000000,
-            duration: frameDuration * 1000000
-          });
-          await writer.write(frame);
-          frame.close();
-        }
-
-        const currentProgress = ((i + 1) / totalFrames) * 100;
-        setProgress(Math.min(100, currentProgress));
         
-        // Regulate speed to be at most real-time to help MediaRecorder stay in sync
-        // This is especially important if MediaRecorder ignores frame timestamps
-        const expectedElapsed = (i + 1) * frameDuration * 1000;
-        const actualElapsed = Date.now() - exportStartTime;
-        if (actualElapsed < expectedElapsed) {
-          await new Promise(resolve => setTimeout(resolve, expectedElapsed - actualElapsed));
+        // 4c. Encode frame and audio
+        const timestamp = Math.round(i * frameDuration * 1000000);
+        try {
+          const bitmap = await createImageBitmap(offscreenCanvas);
+          const frame = new VideoFrame(bitmap, { timestamp, duration: Math.round(frameDuration * 1000000) });
+          videoEncoder.encode(frame);
+          frame.close();
+          bitmap.close();
+          if (i % 100 === 0) console.log(`[Export] Encoded frame ${i}/${totalFrames}`);
+        } catch (encodeError) {
+          console.error("[Export] Frame encoding failed at timestamp", timestamp, encodeError);
         }
 
-        // If not using generator, we need a small additional delay for MediaRecorder to capture the canvas
-        if (!writer) {
-          await new Promise(resolve => setTimeout(resolve, 10));
+        const startSample = Math.floor(i * frameDuration * sampleRate);
+        const endSample = Math.floor((i + 1) * frameDuration * sampleRate);
+        const numSamples = endSample - startSample;
+        if (numSamples > 0) {
+          const interleavedData = new Float32Array(numSamples * 2);
+          const leftChannel = renderedAudioBuffer.getChannelData(0);
+          const rightChannel = renderedAudioBuffer.getChannelData(1);
+          for (let s = 0; s < numSamples; s++) {
+            interleavedData[s * 2] = leftChannel[startSample + s] || 0;
+            interleavedData[s * 2 + 1] = rightChannel[startSample + s] || 0;
+          }
+          const audioData = new AudioData({ format: 'f32', sampleRate: sampleRate, numberOfFrames: numSamples, numberOfChannels: 2, timestamp, data: interleavedData });
+          audioEncoder.encode(audioData);
+          audioData.close();
+        }
+
+        // Wait for next frame's pre-seeks to complete if needed
+        if (i < totalFrames - 1) {
+          const nextActualTime = Math.round((exportRange.start + (i + 1) * frameDuration) * 100) / 100;
+          const nextActiveClips = exportClips.filter(c => nextActualTime >= c.timelinePosition.start && nextActualTime < c.timelinePosition.end);
+          const videoClips = nextActiveClips.filter(c => c.type === TrackType.VIDEO) as VideoClip[];
+          
+          // Await any active seeks for these clips
+          await Promise.all(videoClips.map(c => {
+            const activeSeek = activeSeeks.get(c.id);
+            if (activeSeek) return activeSeek;
+            return seekClip(c, nextActualTime);
+          }));
         }
       }
 
-      console.log(`[Export] Render loop finished. Total frames rendered: ${totalFrames}`);
-      const finalElapsed = (Date.now() - exportStartTime) / 1000;
-      console.log(`[Export] Render took ${finalElapsed.toFixed(2)}s for ${exportDuration}s content`);
+      // 5. Finalize Export
+      console.log("[Export] Finalizing encoders...");
+      await videoEncoder.flush();
+      await audioEncoder.flush();
+      videoEncoder.close();
+      audioEncoder.close();
 
-      if (writer) {
-        await writer.close();
-      }
+      console.log("[Export] Finalizing muxer...");
+      muxer.finalize();
+
+      const { buffer } = muxer.target as (WebMArrayBufferTarget | MP4ArrayBufferTarget);
+      const blob = new Blob([buffer], { type: format === 'mp4' ? 'video/mp4' : 'video/webm' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `sequence-export-${Date.now()}.${format}`;
+      a.click();
       
-      // Stop all tracks to signal the end of the stream
-      recorder.stream.getTracks().forEach(track => track.stop());
+      setStatus('completed');
       
-      // Give the recorder a moment to process the last frames
-      await new Promise(resolve => setTimeout(resolve, 1000));
-      if (recorder.state !== 'inactive') {
-        recorder.stop();
-      }
       // Cleanup
-      await audioCtx.close();
+      videoElementsRef.current = {};
+      imageElementsRef.current = {};
+      audioCtx.close();
 
     } catch (err) {
       console.error("Export error:", err);

@@ -41,18 +41,29 @@ export const VideoPreview: React.FC<VideoPreviewProps> = ({ clips, tracks, curre
   }, [clips, tracks, currentTime]);
 
   const getClipStyle = (clip: VideoClip, zIndex: number, isActive: boolean) => {
-    const transform = clip.transform || {
+    const rawTransform = clip.transform || {
       position: { x: 0, y: 0, z: 0 },
-      rotation: { x: 0, y: 0, z: 0 },
+      rotation: 0,
+      flipHorizontal: false,
+      flipVertical: false,
       scale: { x: 1, y: 1 },
       opacity: 1,
       crop: { top: 0, right: 0, bottom: 0, left: 0 }
+    };
+    const transform = {
+      ...rawTransform,
+      rotation: typeof rawTransform.rotation === 'number' 
+        ? rawTransform.rotation 
+        : (rawTransform.rotation as any)?.z || 0
     };
     const filters = clip.filters || { brightness: 1, saturation: 1, contrast: 1 };
     
     const posX = transform.position.x * scaleFactor;
     const posY = transform.position.y * scaleFactor;
     const posZ = transform.position.z; // Extra z-offset on top of track z-index
+
+    const scaleX = transform.scale.x * (transform.flipHorizontal ? -1 : 1);
+    const scaleY = transform.scale.y * (transform.flipVertical ? -1 : 1);
 
     return {
       zIndex: zIndex + posZ,
@@ -61,10 +72,8 @@ export const VideoPreview: React.FC<VideoPreviewProps> = ({ clips, tracks, curre
       filter: `brightness(${filters.brightness}) saturate(${filters.saturation}) contrast(${filters.contrast || 1})`,
       transform: `
         translate3d(${posX}px, ${posY}px, 0)
-        rotateX(${transform.rotation.x}deg)
-        rotateY(${transform.rotation.y}deg)
-        rotateZ(${transform.rotation.z}deg)
-        scale(${transform.scale.x}, ${transform.scale.y})
+        rotateZ(${transform.rotation}deg)
+        scale(${scaleX}, ${scaleY})
       `,
       clipPath: transform.crop ? `inset(${transform.crop.top}% ${transform.crop.right}% ${transform.crop.bottom}% ${transform.crop.left}%)` : undefined,
       transition: 'opacity 0.2s ease',

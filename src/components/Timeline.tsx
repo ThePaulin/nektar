@@ -99,6 +99,7 @@ export const Timeline: React.FC<TimelineProps> = ({
   const tracksScrollRef = useRef<HTMLDivElement>(null);
   const headerScrollRef = useRef<HTMLDivElement>(null);
   const timelineRootRef = useRef<HTMLDivElement>(null);
+  const [draggingTrackId, setDraggingTrackId] = useState<string | null>(null);
   const [isDraggingPlayhead, setIsDraggingPlayhead] = useState(false);
   const [draggingExportMarker, setDraggingExportMarker] = useState<'start' | 'end' | null>(null);
   const [draggingClipId, setDraggingClipId] = useState<number | null>(null);
@@ -642,13 +643,24 @@ export const Timeline: React.FC<TimelineProps> = ({
                 <Reorder.Item
                   key={track.id}
                   value={track}
-                  className="border-b border-gray-100 px-3 flex flex-col justify-center space-y-1 cursor-pointer transition-all hover:bg-gray-50 bg-white"
+                  onDragStart={() => setDraggingTrackId(track.id)}
+                  onDragEnd={() => setDraggingTrackId(null)}
+                  whileDrag={{ 
+                    scale: 1.01, 
+                    backgroundColor: "#f8fafc",
+                    boxShadow: "0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05)",
+                    zIndex: 50
+                  }}
+                  className="border-b border-gray-100 px-3 flex flex-col justify-center space-y-1 cursor-pointer transition-all hover:bg-gray-50 bg-white relative"
                   style={{
                     height: trackHeight,
                     backgroundColor: selectedTrackId === track.id ? 'rgba(59, 130, 246, 0.05)' : 'transparent'
                   }}
                   onClick={() => onTrackSelect(track.id)}
                 >
+                  {draggingTrackId === track.id && (
+                    <div className="absolute inset-0 border-2 border-blue-500/50 pointer-events-none z-10" />
+                  )}
                   <div className="flex items-center justify-between">
                     <div className="flex items-center space-x-2 overflow-hidden">
                       <div className="cursor-grab active:cursor-grabbing p-0.5 text-gray-300 hover:text-gray-500 transition-colors">
@@ -811,7 +823,7 @@ export const Timeline: React.FC<TimelineProps> = ({
                 {tracks.map((track) => (
                   <div
                     key={track.id}
-                    className={`relative border-b border-gray-200/50 transition-all ${selectedTrackId === track.id ? 'bg-blue-50/20' : ''} ${track.isLocked ? 'bg-gray-100/5' : ''}`}
+                    className={`relative border-b border-gray-200/50 transition-all ${selectedTrackId === track.id ? 'bg-blue-50/20' : ''} ${track.isLocked ? 'bg-gray-100/5' : ''} ${draggingTrackId === track.id ? 'bg-blue-500/5 ring-1 ring-inset ring-blue-500/20' : ''}`}
                     style={{ height: trackHeight }}
                     onDoubleClick={(e) => {
                       if (track.isLocked) return;
@@ -825,6 +837,14 @@ export const Timeline: React.FC<TimelineProps> = ({
                       }
                     }}
                   >
+                    {/* Drop Indicator Lines */}
+                    {draggingTrackId === track.id && (
+                      <>
+                        <div className="absolute top-0 left-0 right-0 h-0.5 bg-blue-500 z-50 shadow-[0_0_8px_rgba(59,130,246,0.5)]" />
+                        <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-blue-500 z-50 shadow-[0_0_8px_rgba(59,130,246,0.5)]" />
+                        <div className="absolute inset-0 bg-blue-500/5 pointer-events-none" />
+                      </>
+                    )}
                     {/* Grid Lines */}
                     <div className="absolute inset-0 pointer-events-none">
                       {ticks.map((tick) => (

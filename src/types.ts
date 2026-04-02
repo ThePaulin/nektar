@@ -27,7 +27,9 @@ export interface VideoClip {
   volume?: number; // 0 to 1
   transform?: {
     position: { x: number; y: number; z: number };
-    rotation: { x: number; y: number; z: number };
+    rotation: number;
+    flipHorizontal?: boolean;
+    flipVertical?: boolean;
     scale: { x: number; y: number };
     opacity: number;
     crop?: { top: number; right: number; bottom: number; left: number };
@@ -46,9 +48,6 @@ export interface VideoClip {
     fontFamily?: string;
     color?: string;
     backgroundColor?: string;
-    position?: { x: number; y: number };
-    scale?: number;
-    rotation?: number;
   };
 }
 

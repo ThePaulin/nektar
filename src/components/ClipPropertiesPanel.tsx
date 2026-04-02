@@ -26,7 +26,9 @@ export const ClipPropertiesPanel: React.FC<ClipPropertiesPanelProps> = ({ clip, 
 
   const defaultTransform = {
     position: { x: 0, y: 0, z: 0 },
-    rotation: { x: 0, y: 0, z: 0 },
+    rotation: 0,
+    flipHorizontal: false,
+    flipVertical: false,
     scale: { x: 1, y: 1 },
     opacity: 1,
     crop: { top: 0, right: 0, bottom: 0, left: 0 }
@@ -38,7 +40,14 @@ export const ClipPropertiesPanel: React.FC<ClipPropertiesPanelProps> = ({ clip, 
     contrast: 1
   };
 
-  const transform = clip.transform || defaultTransform;
+  const rawTransform = clip.transform || defaultTransform;
+  const transform = {
+    ...defaultTransform,
+    ...rawTransform,
+    rotation: typeof rawTransform.rotation === 'number' 
+      ? rawTransform.rotation 
+      : (rawTransform.rotation as any)?.z || 0
+  };
   const filters = clip.filters || defaultFilters;
   const volume = clip.volume !== undefined ? clip.volume : 1;
 
@@ -181,8 +190,10 @@ export const ClipPropertiesPanel: React.FC<ClipPropertiesPanelProps> = ({ clip, 
                   <input
                     type="number"
                     step="0.1"
-                    value={clip.style?.lineHeight || 1.2}
-                    onChange={(e) => updateStyle({ lineHeight: parseFloat(e.target.value) })}
+                    value={clip.style?.lineHeight === 1.2 ? '' : clip.style?.lineHeight}
+                    onChange={(e) => updateStyle({ lineHeight: e.target.value === '' ? 1.2 : parseFloat(e.target.value) })}
+                    onFocus={(e) => e.target.select()}
+                    placeholder="1.2"
                     className="w-full bg-gray-50 border border-gray-200 rounded px-2 py-1 text-xs text-gray-900 outline-none"
                   />
                 </div>
@@ -240,8 +251,10 @@ export const ClipPropertiesPanel: React.FC<ClipPropertiesPanelProps> = ({ clip, 
                 <label className="text-[10px] text-gray-400 font-medium">Position X</label>
                 <input 
                   type="number" 
-                  value={transform.position.x}
-                  onChange={(e) => updateTransform({ position: { ...transform.position, x: Number(e.target.value) } })}
+                  value={transform.position.x === 0 ? '' : transform.position.x}
+                  onChange={(e) => updateTransform({ position: { ...transform.position, x: e.target.value === '' ? 0 : Number(e.target.value) } })}
+                  onFocus={(e) => e.target.select()}
+                  placeholder="0"
                   className="w-full px-2 py-1 text-xs text-gray-900 border border-gray-200 rounded focus:ring-1 focus:ring-blue-500 outline-none"
                 />
               </div>
@@ -249,8 +262,10 @@ export const ClipPropertiesPanel: React.FC<ClipPropertiesPanelProps> = ({ clip, 
                 <label className="text-[10px] text-gray-400 font-medium">Position Y</label>
                 <input 
                   type="number" 
-                  value={transform.position.y}
-                  onChange={(e) => updateTransform({ position: { ...transform.position, y: Number(e.target.value) } })}
+                  value={transform.position.y === 0 ? '' : transform.position.y}
+                  onChange={(e) => updateTransform({ position: { ...transform.position, y: e.target.value === '' ? 0 : Number(e.target.value) } })}
+                  onFocus={(e) => e.target.select()}
+                  placeholder="0"
                   className="w-full px-2 py-1 text-xs text-gray-900 border border-gray-200 rounded focus:ring-1 focus:ring-blue-500 outline-none"
                 />
               </div>
@@ -258,8 +273,10 @@ export const ClipPropertiesPanel: React.FC<ClipPropertiesPanelProps> = ({ clip, 
                 <label className="text-[10px] text-gray-400 font-medium">Position Z (Layer)</label>
                 <input 
                   type="number" 
-                  value={transform.position.z}
-                  onChange={(e) => updateTransform({ position: { ...transform.position, z: Number(e.target.value) } })}
+                  value={transform.position.z === 0 ? '' : transform.position.z}
+                  onChange={(e) => updateTransform({ position: { ...transform.position, z: e.target.value === '' ? 0 : Number(e.target.value) } })}
+                  onFocus={(e) => e.target.select()}
+                  placeholder="0"
                   className="w-full px-2 py-1 text-xs text-gray-900 border border-gray-200 rounded focus:ring-1 focus:ring-blue-500 outline-none"
                 />
               </div>
@@ -285,38 +302,63 @@ export const ClipPropertiesPanel: React.FC<ClipPropertiesPanelProps> = ({ clip, 
               </div>
             </div>
 
-            <div className="space-y-3 pt-2 border-t border-gray-50">
-              <div className="flex items-center space-x-2">
-                <Rotate3d size={14} className="text-gray-500" />
-                <h3 className="text-[11px] font-bold text-gray-500 uppercase tracking-wider">Rotation</h3>
+            <div className="space-y-4 pt-2 border-t border-gray-50">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center space-x-2">
+                  <Rotate3d size={14} className="text-gray-500" />
+                  <h3 className="text-[11px] font-bold text-gray-500 uppercase tracking-wider">Rotation & Flip</h3>
+                </div>
               </div>
-              <div className="grid grid-cols-3 gap-2">
-                <div className="space-y-1">
-                  <label className="text-[9px] text-gray-400">X</label>
-                  <input 
-                    type="number" 
-                    value={transform.rotation.x}
-                    onChange={(e) => updateTransform({ rotation: { ...transform.rotation, x: Number(e.target.value) } })}
-                    className="w-full px-1 py-1 text-[10px] text-gray-900 border border-gray-200 rounded outline-none"
-                  />
+              
+              <div className="space-y-3">
+                <div className="space-y-1.5">
+                  <div className="flex justify-between items-center">
+                    <label className="text-[10px] text-gray-400 font-medium">Rotation (Z-Axis)</label>
+                    <span className="text-[10px] text-gray-500">{transform.rotation}°</span>
+                  </div>
+                  <div className="flex items-center space-x-2">
+                    <input 
+                      type="range" 
+                      min="-360" max="360" step="1"
+                      value={transform.rotation}
+                      onChange={(e) => updateTransform({ rotation: Number(e.target.value) })}
+                      className="flex-grow accent-blue-600"
+                    />
+                    <input 
+                      type="number" 
+                      min="-360" max="360"
+                      value={transform.rotation}
+                      onChange={(e) => updateTransform({ rotation: e.target.value === '' ? 0 : Number(e.target.value) })}
+                      onFocus={(e) => e.target.select()}
+                      placeholder="0"
+                      className="w-12 px-1 py-0.5 text-[10px] text-gray-900 border border-gray-200 rounded outline-none"
+                    />
+                  </div>
                 </div>
-                <div className="space-y-1">
-                  <label className="text-[9px] text-gray-400">Y</label>
-                  <input 
-                    type="number" 
-                    value={transform.rotation.y}
-                    onChange={(e) => updateTransform({ rotation: { ...transform.rotation, y: Number(e.target.value) } })}
-                    className="w-full px-1 py-1 text-[10px] text-gray-900 border border-gray-200 rounded outline-none"
-                  />
-                </div>
-                <div className="space-y-1">
-                  <label className="text-[9px] text-gray-400">Z</label>
-                  <input 
-                    type="number" 
-                    value={transform.rotation.z}
-                    onChange={(e) => updateTransform({ rotation: { ...transform.rotation, z: Number(e.target.value) } })}
-                    className="w-full px-1 py-1 text-[10px] text-gray-900 border border-gray-200 rounded outline-none"
-                  />
+
+                <div className="grid grid-cols-2 gap-3">
+                  <button
+                    onClick={() => updateTransform({ flipHorizontal: !transform.flipHorizontal })}
+                    className={`flex items-center justify-center space-x-2 py-1.5 px-3 rounded border transition-all ${
+                      transform.flipHorizontal 
+                        ? 'bg-blue-50 border-blue-200 text-blue-600' 
+                        : 'bg-gray-50 border-gray-200 text-gray-600 hover:bg-gray-100'
+                    }`}
+                  >
+                    <StretchHorizontal size={14} />
+                    <span className="text-[10px] font-medium">Flip H</span>
+                  </button>
+                  <button
+                    onClick={() => updateTransform({ flipVertical: !transform.flipVertical })}
+                    className={`flex items-center justify-center space-x-2 py-1.5 px-3 rounded border transition-all ${
+                      transform.flipVertical 
+                        ? 'bg-blue-50 border-blue-200 text-blue-600' 
+                        : 'bg-gray-50 border-gray-200 text-gray-600 hover:bg-gray-100'
+                    }`}
+                  >
+                    <ArrowDownUp size={14} />
+                    <span className="text-[10px] font-medium">Flip V</span>
+                  </button>
                 </div>
               </div>
             </div>
@@ -332,8 +374,10 @@ export const ClipPropertiesPanel: React.FC<ClipPropertiesPanelProps> = ({ clip, 
                     <label className="text-[9px] text-gray-400">Top</label>
                     <input 
                       type="number" min="0" max="100"
-                      value={transform.crop?.top || 0}
-                      onChange={(e) => updateTransform({ crop: { ...(transform.crop || {top:0,right:0,bottom:0,left:0}), top: Number(e.target.value) } })}
+                      value={transform.crop?.top === 0 ? '' : (transform.crop?.top || 0)}
+                      onChange={(e) => updateTransform({ crop: { ...(transform.crop || {top:0,right:0,bottom:0,left:0}), top: e.target.value === '' ? 0 : Number(e.target.value) } })}
+                      onFocus={(e) => e.target.select()}
+                      placeholder="0"
                       className="w-full px-2 py-1 text-xs text-gray-900 border border-gray-200 rounded outline-none"
                     />
                   </div>
@@ -341,8 +385,10 @@ export const ClipPropertiesPanel: React.FC<ClipPropertiesPanelProps> = ({ clip, 
                     <label className="text-[9px] text-gray-400">Bottom</label>
                     <input 
                       type="number" min="0" max="100"
-                      value={transform.crop?.bottom || 0}
-                      onChange={(e) => updateTransform({ crop: { ...(transform.crop || {top:0,right:0,bottom:0,left:0}), bottom: Number(e.target.value) } })}
+                      value={transform.crop?.bottom === 0 ? '' : (transform.crop?.bottom || 0)}
+                      onChange={(e) => updateTransform({ crop: { ...(transform.crop || {top:0,right:0,bottom:0,left:0}), bottom: e.target.value === '' ? 0 : Number(e.target.value) } })}
+                      onFocus={(e) => e.target.select()}
+                      placeholder="0"
                       className="w-full px-2 py-1 text-xs text-gray-900 border border-gray-200 rounded outline-none"
                     />
                   </div>
@@ -350,8 +396,10 @@ export const ClipPropertiesPanel: React.FC<ClipPropertiesPanelProps> = ({ clip, 
                     <label className="text-[9px] text-gray-400">Left</label>
                     <input 
                       type="number" min="0" max="100"
-                      value={transform.crop?.left || 0}
-                      onChange={(e) => updateTransform({ crop: { ...(transform.crop || {top:0,right:0,bottom:0,left:0}), left: Number(e.target.value) } })}
+                      value={transform.crop?.left === 0 ? '' : (transform.crop?.left || 0)}
+                      onChange={(e) => updateTransform({ crop: { ...(transform.crop || {top:0,right:0,bottom:0,left:0}), left: e.target.value === '' ? 0 : Number(e.target.value) } })}
+                      onFocus={(e) => e.target.select()}
+                      placeholder="0"
                       className="w-full px-2 py-1 text-xs text-gray-900 border border-gray-200 rounded outline-none"
                     />
                   </div>
@@ -359,8 +407,10 @@ export const ClipPropertiesPanel: React.FC<ClipPropertiesPanelProps> = ({ clip, 
                     <label className="text-[9px] text-gray-400">Right</label>
                     <input 
                       type="number" min="0" max="100"
-                      value={transform.crop?.right || 0}
-                      onChange={(e) => updateTransform({ crop: { ...(transform.crop || {top:0,right:0,bottom:0,left:0}), right: Number(e.target.value) } })}
+                      value={transform.crop?.right === 0 ? '' : (transform.crop?.right || 0)}
+                      onChange={(e) => updateTransform({ crop: { ...(transform.crop || {top:0,right:0,bottom:0,left:0}), right: e.target.value === '' ? 0 : Number(e.target.value) } })}
+                      onFocus={(e) => e.target.select()}
+                      placeholder="0"
                       className="w-full px-2 py-1 text-xs text-gray-900 border border-gray-200 rounded outline-none"
                     />
                   </div>
