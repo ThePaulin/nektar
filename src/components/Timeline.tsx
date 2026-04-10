@@ -3,7 +3,7 @@ import { motion, Reorder } from 'motion/react';
 import {
   Plus, Scissors, Trash2, ZoomIn, ZoomOut, Download, CheckCircle2,
   Eye, EyeOff, Lock, Unlock, Volume2, VolumeX, MoreVertical, Copy, Trash,
-  ChevronUp, ChevronDown, Radio, GripVertical
+  ChevronUp, ChevronDown, Radio, GripVertical, Palette
 } from 'lucide-react';
 import { VideoClip, VideoObjType, Track, TrackType } from '../types';
 import { ThumbnailStrip } from './ThumbnailStrip';
@@ -35,6 +35,7 @@ interface TimelineProps {
   onTrackMove: (id: string, direction: 'up' | 'down') => void;
   onTracksReorder: (newTracks: Track[]) => void;
   onAddTrack: (type: TrackType) => void;
+  onLutUpload?: (trackId: string, file: File) => void;
   onAddTextClip?: (type: TrackType.TEXT | TrackType.SUBTITLE, startTime?: number, trackId?: string) => void;
   pixelsPerSecond: number;
   onPixelsPerSecondChange: (value: number) => void;
@@ -85,6 +86,7 @@ export const Timeline: React.FC<TimelineProps> = ({
   onTrackMove,
   onTracksReorder,
   onAddTrack,
+  onLutUpload,
   onAddTextClip,
   onClipContentUpdate,
   onClipUpdate,
@@ -639,25 +641,36 @@ export const Timeline: React.FC<TimelineProps> = ({
               onReorder={onTracksReorder}
               className="flex flex-col"
             >
-              {tracks.map((track) => (
-                <Reorder.Item
-                  key={track.id}
-                  value={track}
-                  onDragStart={() => setDraggingTrackId(track.id)}
-                  onDragEnd={() => setDraggingTrackId(null)}
-                  whileDrag={{ 
-                    scale: 1.01, 
-                    backgroundColor: "#f8fafc",
-                    boxShadow: "0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05)",
-                    zIndex: 50
-                  }}
-                  className="border-b border-gray-100 px-3 flex flex-col justify-center space-y-1 cursor-pointer transition-all hover:bg-gray-50 bg-white relative"
-                  style={{
-                    height: trackHeight,
-                    backgroundColor: selectedTrackId === track.id ? 'rgba(59, 130, 246, 0.05)' : 'transparent'
-                  }}
-                  onClick={() => onTrackSelect(track.id)}
-                >
+              {tracks
+                .filter(track => {
+                  if (track.isSubTrack) {
+                    const hasClips = clips.some(c => c.trackId === track.id);
+                    return hasClips;
+                  }
+                  return true;
+                })
+                .map((track) => {
+                  const currentTrackHeight = track.isSubTrack ? TRACK_HEIGHTS.sm : trackHeight;
+                  
+                  return (
+                    <Reorder.Item
+                      key={track.id}
+                      value={track}
+                      onDragStart={() => setDraggingTrackId(track.id)}
+                      onDragEnd={() => setDraggingTrackId(null)}
+                      whileDrag={{ 
+                        scale: 1.01, 
+                        backgroundColor: "#f8fafc",
+                        boxShadow: "0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05)",
+                        zIndex: 50
+                      }}
+                      className={`border-b border-gray-100 px-3 flex flex-col justify-center space-y-1 cursor-pointer transition-all hover:bg-gray-50 bg-white relative ${track.isSubTrack ? 'pl-8 bg-gray-50/50' : ''}`}
+                      style={{
+                        height: currentTrackHeight,
+                        backgroundColor: selectedTrackId === track.id ? 'rgba(59, 130, 246, 0.05)' : 'transparent'
+                      }}
+                      onClick={() => onTrackSelect(track.id)}
+                    >
                   {draggingTrackId === track.id && (
                     <div className="absolute inset-0 border-2 border-blue-500/50 pointer-events-none z-10" />
                   )}
@@ -712,6 +725,25 @@ export const Timeline: React.FC<TimelineProps> = ({
                       >
                         {track.isLocked ? <Lock size={12} /> : <Unlock size={12} />}
                       </button>
+                      {(track.type === TrackType.VIDEO || track.type === TrackType.SCREEN) && (
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            const input = document.createElement('input');
+                            input.type = 'file';
+                            input.accept = '.cube';
+                            input.onchange = (ev) => {
+                              const file = (ev.target as HTMLInputElement).files?.[0];
+                              if (file && onLutUpload) onLutUpload(track.id, file);
+                            };
+                            input.click();
+                          }}
+                          className={`p-1 rounded hover:bg-gray-200 transition-colors ${track.lutConfig?.enabled ? 'text-purple-500' : 'text-gray-400'}`}
+                          title="Apply LUT (.cube)"
+                        >
+                          <Palette size={12} />
+                        </button>
+                      )}
                       {(track.type === TrackType.VIDEO || track.type === TrackType.AUDIO || track.type === TrackType.IMAGE || track.type === TrackType.SCREEN) && (
                         <button
                           onClick={(e) => { e.stopPropagation(); onTrackUpdate(track.id, { isArmed: !track.isArmed }); }}
@@ -736,6 +768,37 @@ export const Timeline: React.FC<TimelineProps> = ({
                       {track.type}
                     </span>
                     <div className="flex-1" />
+                    {track.lutConfig?.enabled && (
+                      <div className="flex items-center space-x-1 px-1 bg-purple-50 rounded border border-purple-100">
+                        <span className="text-[8px] text-purple-600 font-bold uppercase">LUT</span>
+                        <input
+                          type="range"
+                          min="0"
+                          max="1"
+                          step="0.01"
+                          value={track.lutConfig.intensity}
+                          onChange={(e) => {
+                            e.stopPropagation();
+                            onTrackUpdate(track.id, {
+                              lutConfig: { ...track.lutConfig!, intensity: parseFloat(e.target.value) }
+                            });
+                          }}
+                          className="w-12 h-1 accent-purple-500"
+                          title={`Intensity: ${Math.round(track.lutConfig.intensity * 100)}%`}
+                        />
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onTrackUpdate(track.id, {
+                              lutConfig: { ...track.lutConfig!, enabled: false }
+                            });
+                          }}
+                          className="text-purple-400 hover:text-purple-600"
+                        >
+                          <Trash2 size={8} />
+                        </button>
+                      </div>
+                    )}
                     <div className="flex items-center space-x-1">
                       <button
                         onClick={(e) => { e.stopPropagation(); onTrackMove(track.id, 'up'); }}
@@ -770,8 +833,9 @@ export const Timeline: React.FC<TimelineProps> = ({
                     </button>
                   </div>
                 </Reorder.Item>
-              ))}
-            </Reorder.Group>
+              );
+            })}
+          </Reorder.Group>
             {/* redundant section removed
             <div className="p-3">
               <div className="grid grid-cols-2 gap-2">
@@ -820,11 +884,22 @@ export const Timeline: React.FC<TimelineProps> = ({
             >
               {/* Tracks Area */}
               <div className="relative">
-                {tracks.map((track) => (
-                  <div
-                    key={track.id}
-                    className={`relative border-b border-gray-200/50 transition-all ${selectedTrackId === track.id ? 'bg-blue-50/20' : ''} ${track.isLocked ? 'bg-gray-100/5' : ''} ${draggingTrackId === track.id ? 'bg-blue-500/5 ring-1 ring-inset ring-blue-500/20' : ''}`}
-                    style={{ height: trackHeight }}
+                {tracks
+                  .filter(track => {
+                    if (track.isSubTrack) {
+                      const hasClips = clips.some(c => c.trackId === track.id);
+                      return hasClips;
+                    }
+                    return true;
+                  })
+                  .map((track) => {
+                    const currentTrackHeight = track.isSubTrack ? TRACK_HEIGHTS.sm : trackHeight;
+                    
+                    return (
+                      <div
+                        key={track.id}
+                        className={`relative border-b border-gray-200/50 transition-all ${selectedTrackId === track.id ? 'bg-blue-50/20' : ''} ${track.isLocked ? 'bg-gray-100/5' : ''} ${draggingTrackId === track.id ? 'bg-blue-500/5 ring-1 ring-inset ring-blue-500/20' : ''}`}
+                        style={{ height: currentTrackHeight }}
                     onDoubleClick={(e) => {
                       if (track.isLocked) return;
                       if (track.type === TrackType.TEXT || track.type === TrackType.SUBTITLE) {
@@ -868,14 +943,14 @@ export const Timeline: React.FC<TimelineProps> = ({
                       return (
                         <div
                           key={clip.id}
-                          className={`absolute top-2 bg-black rounded-md border-2 overflow-hidden group shadow-lg transition-[border-color,transform,shadow,ring] ${track.isLocked ? 'border-gray-700 opacity-60 cursor-not-allowed grayscale-[0.5]' :
+                          className={`absolute top-2 bg-black rounded-md border-2 overflow-hidden group shadow-lg transition-[border-color,transform,shadow,ring] ${clip.isPlaceholder ? 'border-dashed border-blue-400/50 bg-blue-900/20' : ''} ${track.isLocked ? 'border-gray-700 opacity-60 cursor-not-allowed grayscale-[0.5]' :
                             draggingClipId === clip.id ? 'border-blue-500 z-40 scale-[1.02] shadow-blue-500/30 !transition-none cursor-grabbing' :
                               isSelected ? 'border-blue-500 z-30 shadow-blue-500/40 ring-2 ring-blue-500/20 cursor-grab' : 'border-gray-800 cursor-grab active:cursor-grabbing'
                             }`}
                           style={{
                             left: start * pixelsPerSecond,
                             width: duration * pixelsPerSecond,
-                            height: trackHeight - 16
+                            height: currentTrackHeight - 16
                           }}
                           onMouseDown={(e) => {
                             if (track.isLocked) return;
@@ -915,7 +990,11 @@ export const Timeline: React.FC<TimelineProps> = ({
                               <Lock size={16} className="text-white/40" />
                             </div>
                           )}
-                          {clip.type === TrackType.VIDEO || clip.type === TrackType.IMAGE || clip.type === TrackType.SCREEN ? (
+                          {clip.isPlaceholder ? (
+                            <div className="w-full h-full flex items-center justify-center bg-blue-900/10">
+                              <span className="text-[10px] text-blue-400/50 font-bold uppercase tracking-widest">Group Track</span>
+                            </div>
+                          ) : clip.type === TrackType.VIDEO || clip.type === TrackType.IMAGE || clip.type === TrackType.SCREEN ? (
                             <ThumbnailStrip
                               videoUrl={clip.videoUrl || clip.thumbnailUrl || ''}
                               duration={clip.duration}
@@ -998,8 +1077,9 @@ export const Timeline: React.FC<TimelineProps> = ({
                         </div>
                       );
                     })}
-                  </div>
-                ))}
+                      </div>
+                    );
+                  })}
 
                 {/* Spacer to match sidebar buttons */}
                 <div className="h-24" />

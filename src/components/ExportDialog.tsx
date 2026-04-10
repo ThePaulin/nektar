@@ -4,6 +4,7 @@ import { X, Download, Loader2, CheckCircle2, AlertCircle } from 'lucide-react';
 import { VideoObjType, Track, TrackType, VideoClip } from '../types';
 import { Muxer as WebMMuxer, ArrayBufferTarget as WebMArrayBufferTarget } from 'webm-muxer';
 import { Muxer as MP4Muxer, ArrayBufferTarget as MP4ArrayBufferTarget } from 'mp4-muxer';
+import { parseCubeLUT, LUTData } from '../lib/lut';
 
 // WebGPU Shader for Compositing
 const COMPOSITE_SHADER = `
@@ -15,6 +16,10 @@ const COMPOSITE_SHADER = `
   struct Uniforms {
     transform: mat3x3<f32>,
     opacity: f32,
+    lut_intensity: f32,
+    has_lut: u32,
+    is_overlay: u32,
+    overlay_rect: vec4<f32>, // x, y, w, h
     crop: vec4<f32>, // top, right, bottom, left
   };
 
@@ -54,6 +59,8 @@ const COMPOSITE_SHADER = `
   @group(0) @binding(2) var t_ext: texture_external;
   @group(0) @binding(3) var t_2d: texture_2d<f32>;
   @group(0) @binding(4) var<uniform> is_external: u32;
+  @group(0) @binding(5) var t_lut: texture_3d<f32>;
+  @group(0) @binding(6) var s_lut: sampler;
 
   @fragment
   fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
@@ -63,6 +70,29 @@ const COMPOSITE_SHADER = `
     } else {
       color = textureSample(t_2d, s, in.texCoord);
     }
+
+    if (u.has_lut == 1u) {
+      var apply_lut = false;
+      if (u.is_overlay == 1u) {
+        // Check if current pixel is within overlay_rect
+        // Note: in.position is in framebuffer coordinates (0 to width, 0 to height)
+        if (in.position.x >= u.overlay_rect.x && in.position.x <= u.overlay_rect.x + u.overlay_rect.z &&
+            in.position.y >= u.overlay_rect.y && in.position.y <= u.overlay_rect.y + u.overlay_rect.w) {
+          apply_lut = true;
+        }
+      } else {
+        apply_lut = true;
+      }
+      
+      if (apply_lut) {
+        // 3D LUT lookup with voxel-center mapping
+        let lut_size = f32(textureDimensions(t_lut).x);
+        let coords = color.rgb * ((lut_size - 1.0) / lut_size) + (0.5 / lut_size);
+        let lut_color = textureSample(t_lut, s_lut, coords).rgb;
+        color = vec4<f32>(mix(color.rgb, lut_color, u.lut_intensity), color.a);
+      }
+    }
+
     return vec4<f32>(color.rgb, color.a * u.opacity);
   }
 `;
@@ -84,6 +114,8 @@ export const ExportDialog: React.FC<ExportDialogProps> = ({ clips, tracks, total
   const chunksRef = useRef<Blob[]>([]);
   const videoElementsRef = useRef<{ [key: number]: HTMLVideoElement }>({});
   const imageElementsRef = useRef<{ [key: number]: HTMLImageElement }>({});
+  const lutTexturesRef = useRef<{ [key: string]: any }>({});
+  const dummyLutTextureRef = useRef<any | null>(null);
 
   const isMp4Supported = MediaRecorder.isTypeSupported('video/mp4') || MediaRecorder.isTypeSupported('video/mp4;codecs=avc1');
   const [format, setFormat] = useState<'webm' | 'mp4'>(isMp4Supported ? 'mp4' : 'webm');
@@ -124,7 +156,44 @@ export const ExportDialog: React.FC<ExportDialogProps> = ({ clips, tracks, total
       }
 
       // Preload visual elements
-      console.log("[Export] Preloading visual elements...");
+      console.log("[Export] Preloading visual elements and LUTs...");
+      
+      // Preload LUTs
+      const tracksWithLut = tracks.filter(t => t.lutConfig?.enabled && t.lutConfig.url);
+      await Promise.all(tracksWithLut.map(async (track) => {
+        if (!track.lutConfig?.url) return;
+        try {
+          const response = await fetch(track.lutConfig.url);
+          const cubeString = await response.text();
+          const lutData = parseCubeLUT(cubeString);
+          
+          if (gpuDevice) {
+            const size = lutData.size;
+            const texture = gpuDevice.createTexture({
+              size: [size, size, size],
+              format: 'rgba8unorm',
+              dimension: '3d',
+              usage: (window as any).GPUTextureUsage.TEXTURE_BINDING | (window as any).GPUBufferUsage.COPY_DST
+            });
+
+            const lutUint8 = new Uint8Array(lutData.data.length);
+            for (let i = 0; i < lutData.data.length; i++) {
+              lutUint8[i] = Math.max(0, Math.min(255, Math.round(lutData.data[i] * 255)));
+            }
+
+            gpuDevice.queue.writeTexture(
+              { texture },
+              lutUint8.buffer,
+              { bytesPerRow: size * 4, rowsPerImage: size },
+              [size, size, size]
+            );
+            lutTexturesRef.current[track.id] = texture;
+          }
+        } catch (e) {
+          console.warn(`[Export] Failed to load LUT for track ${track.id}:`, e);
+        }
+      }));
+
       await Promise.all(exportClips.map(async (clip, index) => {
         try {
           if (clip.type === TrackType.VIDEO || clip.type === TrackType.AUDIO) {
@@ -267,6 +336,14 @@ export const ExportDialog: React.FC<ExportDialogProps> = ({ clips, tracks, total
                 size: [1, 1], 
                 format: 'rgba8unorm', 
                 usage: (window as any).GPUTextureUsage.TEXTURE_BINDING 
+              });
+
+              // Create a dummy 3D LUT texture (2x2x2)
+              dummyLutTextureRef.current = gpuDevice.createTexture({
+                size: [2, 2, 2],
+                format: 'rgba8unorm',
+                dimension: '3d',
+                usage: (window as any).GPUTextureUsage.TEXTURE_BINDING | (window as any).GPUBufferUsage.COPY_DST
               });
 
               // Pre-create constant buffers for isExternal flag
@@ -459,14 +536,17 @@ export const ExportDialog: React.FC<ExportDialogProps> = ({ clips, tracks, total
 
           let hasGpuVideo = false;
           for (const clip of activeClips) {
-            if (clip.type !== TrackType.VIDEO) continue;
+            if (clip.type !== TrackType.VIDEO && clip.type !== TrackType.SCREEN) continue;
 
             const track = tracks.find(t => t.id === clip.trackId);
             if (!track || !track.isVisible) continue;
 
+            const parentTrack = track.parentId ? tracks.find(t => t.id === track.parentId) : null;
+            const effectiveTrack = parentTrack || track;
+            
             const transform = { position: { x: 0, y: 0 }, rotation: 0, flipHorizontal: false, flipVertical: false, scale: { x: 1, y: 1 }, opacity: 1, crop: { top: 0, right: 0, bottom: 0, left: 0 }, ...(clip.transform || {}) };
             const rotation = (typeof transform.rotation === 'number' ? transform.rotation : (transform.rotation as any)?.z || 0) * Math.PI / 180;
-
+            
             const cos = Math.cos(rotation);
             const sin = Math.sin(rotation);
             const sx = (transform.scale?.x || 1) * (transform.flipHorizontal ? -1 : 1);
@@ -474,13 +554,51 @@ export const ExportDialog: React.FC<ExportDialogProps> = ({ clips, tracks, total
             const tx = (transform.position.x || 0) / 640; 
             const ty = -(transform.position.y || 0) / 360; 
 
-            const uniformData = new Float32Array(12 + 4 + 4); 
-            uniformData[0] = sx * cos; uniformData[1] = sx * sin; uniformData[2] = 0;
-            uniformData[4] = -sy * sin; uniformData[5] = sy * cos; uniformData[6] = 0;
-            uniformData[8] = tx; uniformData[9] = ty; uniformData[10] = 1;
+            const uniformData = new Float32Array(24); 
+            uniformData[0] = sx * cos; uniformData[1] = sx * sin; uniformData[2] = 0; uniformData[3] = 0;
+            uniformData[4] = -sy * sin; uniformData[5] = sy * cos; uniformData[6] = 0; uniformData[7] = 0;
+            uniformData[8] = tx; uniformData[9] = ty; uniformData[10] = 1; uniformData[11] = 0;
+            
             uniformData[12] = transform.opacity;
+            uniformData[13] = effectiveTrack.lutConfig?.intensity ?? 1;
+            
+            const isCameraSubTrack = track.isSubTrack && track.subTrackType === 'camera';
+            const isStandardVideo = !track.isSubTrack && track.type === TrackType.VIDEO;
+            
+            let hasLut = (effectiveTrack.lutConfig?.enabled && lutTexturesRef.current[effectiveTrack.id]) ? 1 : 0;
+            let isOverlay = 0;
+            
+            if (isCameraSubTrack || isStandardVideo) {
+              const isScreen = clip.type === TrackType.SCREEN;
+              const hasOverlay = !!clip.overlayRect;
+              
+              if (isScreen) {
+                if (hasOverlay) {
+                  isOverlay = 1;
+                } else {
+                  hasLut = 0; // Ignore screen recordings without overlay
+                }
+              }
+            } else {
+              hasLut = 0; // Screen sub-track or other: no LUT
+            }
+            
+            const uintView = new Uint32Array(uniformData.buffer);
+            uintView[14] = hasLut;
+            uintView[15] = isOverlay;
+
+            if (clip.overlayRect) {
+              // Scale overlay rect to export resolution (1280x720)
+              const scaleX = 1280 / 1920;
+              const scaleY = 720 / 1080;
+              uniformData[16] = clip.overlayRect.x * scaleX;
+              uniformData[17] = clip.overlayRect.y * scaleY;
+              uniformData[18] = clip.overlayRect.width * scaleX;
+              uniformData[19] = clip.overlayRect.height * scaleY;
+            }
+
             const crop = transform.crop || { top: 0, right: 0, bottom: 0, left: 0 };
-            uniformData.set([crop.top, crop.right, crop.bottom, crop.left], 16);
+            uniformData.set([crop.top, crop.right, crop.bottom, crop.left], 20);
 
             const uniformBuffer = gpuDevice.createBuffer({
               size: uniformData.byteLength,
@@ -494,6 +612,10 @@ export const ExportDialog: React.FC<ExportDialogProps> = ({ clips, tracks, total
             if (video && video.readyState >= 2 && video.videoWidth > 0) {
               try {
                 const videoTexture = gpuDevice.importExternalTexture({ source: video });
+                const lutTexture = (hasLut && lutTexturesRef.current[effectiveTrack.id]) 
+                  ? lutTexturesRef.current[effectiveTrack.id] 
+                  : dummyLutTextureRef.current!;
+                
                 const bindGroup = gpuDevice.createBindGroup({
                   layout: gpuPipeline.getBindGroupLayout(0),
                   entries: [
@@ -501,7 +623,9 @@ export const ExportDialog: React.FC<ExportDialogProps> = ({ clips, tracks, total
                     { binding: 1, resource: gpuSampler },
                     { binding: 2, resource: videoTexture },
                     { binding: 3, resource: dummyTexture.createView() },
-                    { binding: 4, resource: { buffer: externalTrueBuffer } }
+                    { binding: 4, resource: { buffer: externalTrueBuffer } },
+                    { binding: 5, resource: lutTexture.createView() },
+                    { binding: 6, resource: gpuSampler } // Reuse sampler for LUT
                   ]
                 });
 
@@ -538,7 +662,7 @@ export const ExportDialog: React.FC<ExportDialogProps> = ({ clips, tracks, total
           offscreenCtx.rotate(rotation * Math.PI / 180);
           offscreenCtx.scale((transform.scale?.x || 1) * (transform.flipHorizontal ? -1 : 1), (transform.scale?.y || 1) * (transform.flipVertical ? -1 : 1));
 
-          if (clip.type === TrackType.VIDEO) {
+          if (clip.type === TrackType.VIDEO || clip.type === TrackType.SCREEN) {
             const video = videoElementsRef.current[clip.id];
             if (video && video.videoWidth > 0) {
               const crop = transform.crop || { top: 0, right: 0, bottom: 0, left: 0 };
@@ -611,7 +735,7 @@ export const ExportDialog: React.FC<ExportDialogProps> = ({ clips, tracks, total
         if (i < totalFrames - 1) {
           const nextActualTime = Math.round((exportRange.start + (i + 1) * frameDuration) * 100) / 100;
           const nextActiveClips = exportClips.filter(c => nextActualTime >= c.timelinePosition.start && nextActualTime < c.timelinePosition.end);
-          const videoClips = nextActiveClips.filter(c => c.type === TrackType.VIDEO) as VideoClip[];
+          const videoClips = nextActiveClips.filter(c => c.type === TrackType.VIDEO || c.type === TrackType.SCREEN) as VideoClip[];
           
           // Await any active seeks for these clips
           await Promise.all(videoClips.map(c => {

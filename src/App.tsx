@@ -7,12 +7,12 @@ import { Recorder } from './components/Recorder';
 import { AudioRecorder } from './components/AudioRecorder';
 import { ClipPropertiesPanel } from './components/ClipPropertiesPanel';
 import { TrackActionArea } from './components/TrackActionArea';
-import { VideoObjType, VideoClip, RecordingMode, Track, TrackType } from './types';
+import { VideoObjType, VideoClip, RecordingMode, Track, TrackType, RecordingSource } from './types';
 import { videoDB } from './services/db';
 import {
   Play, Pause, SkipBack, SkipForward, Video, Download, Undo2, Redo2, Radio,
   ChevronDown, Archive, FileVideo, History, Trash2, AlertCircle, X, Upload,
-  MousePointer2, ArrowRightToLine, Plus, Layers, Music, Type as TypeIcon, Subtitles, Image as ImageIcon
+  MousePointer2, ArrowRightToLine, Plus, Layers, Music, Type as TypeIcon, Subtitles, Image as ImageIcon, Palette
 } from 'lucide-react';
 
 const TIMELINE_MAX_HEIGHT: number = 623;
@@ -20,7 +20,9 @@ const TIMELINE_MIN_HEIGHT: number = 315;
 
 const INITIAL_TRACKS: Track[] = [
   { id: 'track-1', name: 'Video 1', type: TrackType.VIDEO, isVisible: true, isLocked: false, isMuted: false, isArmed: true, order: 0 },
-  { id: 'track-2', name: 'Audio 1', type: TrackType.AUDIO, isVisible: true, isLocked: false, isMuted: false, isArmed: true, order: 1 },
+  { id: 'track-1-camera', name: 'Camera', type: TrackType.VIDEO, isVisible: true, isLocked: false, isMuted: false, isArmed: true, order: 1, parentId: 'track-1', isSubTrack: true, subTrackType: 'camera' },
+  { id: 'track-1-screen', name: 'Screen', type: TrackType.VIDEO, isVisible: true, isLocked: false, isMuted: false, isArmed: true, order: 2, parentId: 'track-1', isSubTrack: true, subTrackType: 'screen' },
+  { id: 'track-2', name: 'Audio 1', type: TrackType.AUDIO, isVisible: true, isLocked: false, isMuted: false, isArmed: true, order: 3 },
 ];
 
 const MOCK_CLIPS: VideoObjType = [
@@ -66,6 +68,7 @@ export default function App() {
   const [timelineHeight, setTimelineHeight] = useState(500);
   const [isResizing, setIsResizing] = useState(false);
   const [showRestorePrompt, setShowRestorePrompt] = useState(false);
+  const [showLutPreview, setShowLutPreview] = useState(false);
   const [pendingRestoredClips, setPendingRestoredClips] = useState<VideoObjType | null>(null);
   const [pendingRestoredTracks, setPendingRestoredTracks] = useState<Track[] | null>(null);
   const [past, setPast] = useState<VideoObjType[]>([]);
@@ -389,10 +392,10 @@ export default function App() {
       const tick = () => {
         const elapsed = (Date.now() - startTime) / 1000;
         if (elapsed >= totalDuration) {
-          setCurrentTime(Math.round(totalDuration * 30) / 30);
+          setCurrentTime(totalDuration);
           setIsPlaying(false);
         } else {
-          setCurrentTime(Math.round(elapsed * 30) / 30);
+          setCurrentTime(elapsed);
           playbackRef.current = requestAnimationFrame(tick);
         }
       };
@@ -507,7 +510,14 @@ export default function App() {
     }
   };
 
-  const handleRecordingComplete = async (videoUrl: string, duration: number, blob: Blob) => {
+  const handleRecordingComplete = async (
+    videoUrl: string,
+    duration: number,
+    blob: Blob,
+    overlayRect?: { x: number; y: number; width: number; height: number },
+    source?: RecordingSource,
+    multiRecordings?: { source: RecordingSource, url: string, blob: Blob, width?: number, height?: number }[]
+  ) => {
     const targetTrack = tracks.find(t => t.id === selectedTrackId);
     if (!targetTrack) return;
 
@@ -521,27 +531,149 @@ export default function App() {
     const isImage = targetTrack.type === TrackType.IMAGE;
     const finalDuration = isImage ? 5 : duration;
 
-    const newClip: VideoClip = {
-      id: newId,
-      trackId: selectedTrackId,
-      type: targetTrack.type,
-      label: isImage ? `Photo ${new Date().toLocaleTimeString()}` : `Recording ${new Date().toLocaleTimeString()}`,
-      videoUrl: isImage ? undefined : videoUrl,
-      thumbnailUrl: isImage ? videoUrl : `https://picsum.photos/seed/${newId}/200/120`,
-      duration: finalDuration,
-      sourceStart: 0,
-      timelinePosition: {
-        start: recordingStartTime,
-        end: recordingStartTime + finalDuration,
-      },
-      blobId,
-    };
+    const newClips: VideoClip[] = [];
+    const baseId = Date.now();
+
+    if (targetTrack.type === TrackType.VIDEO || targetTrack.type === TrackType.SCREEN) {
+      const cameraSubTrack = tracks.find(t => t.parentId === targetTrack.id && t.subTrackType === 'camera');
+      const screenSubTrack = tracks.find(t => t.parentId === targetTrack.id && t.subTrackType === 'screen');
+
+      const placeholderId = baseId;
+      const childIds: number[] = [];
+      let nextId = baseId + 1;
+
+      if (source === 'overlay' || overlayRect) {
+        const camRec = multiRecordings?.find(r => r.source === 'camera');
+        const screenRec = multiRecordings?.find(r => r.source === 'screen');
+
+        if (cameraSubTrack) {
+          const camId = nextId++;
+          childIds.push(camId);
+          
+          let transform;
+          if (overlayRect && camRec?.width && camRec?.height) {
+            const { x, y, width: w, height: h } = overlayRect;
+            const camWidth = camRec.width;
+            const camHeight = camRec.height;
+            const minDim = Math.min(camWidth, camHeight);
+            
+            const cropL = ((camWidth - minDim) / 2 / camWidth) * 100;
+            const cropT = ((camHeight - minDim) / 2 / camHeight) * 100;
+
+            // Convert 1920x1080 overlayRect to 1280x720 reference space
+            const scale = 1280 / 1920;
+            const x1280 = x * scale;
+            const y1280 = y * scale;
+            const w1280 = w * scale;
+            const h1280 = h * scale;
+
+            transform = {
+              position: {
+                x: (x1280 + w1280 / 2) - 1280 / 2,
+                y: (y1280 + h1280 / 2) - 720 / 2,
+                z: 0
+              },
+              rotation: 0,
+              scale: {
+                x: w1280 / 1280,
+                y: h1280 / 720
+              },
+              opacity: 1,
+              crop: {
+                top: cropT,
+                right: cropL,
+                bottom: cropT,
+                left: cropL
+              }
+            };
+          }
+
+          newClips.push({
+            id: camId,
+            trackId: cameraSubTrack.id,
+            type: TrackType.VIDEO,
+            label: `Camera ${new Date().toLocaleTimeString()}`,
+            videoUrl: camRec?.url || videoUrl,
+            thumbnailUrl: `https://picsum.photos/seed/${camId}/200/120`,
+            duration: finalDuration,
+            sourceStart: 0,
+            timelinePosition: { start: recordingStartTime, end: recordingStartTime + finalDuration },
+            blobId: `blob_${camId}`,
+            overlayRect, // Camera clip has the overlay rect
+            transform,
+          });
+        }
+        if (screenSubTrack) {
+          const screenId = nextId++;
+          childIds.push(screenId);
+          newClips.push({
+            id: screenId,
+            trackId: screenSubTrack.id,
+            type: TrackType.VIDEO,
+            label: `Screen ${new Date().toLocaleTimeString()}`,
+            videoUrl: screenRec?.url || videoUrl,
+            thumbnailUrl: `https://picsum.photos/seed/${screenId}/200/120`,
+            duration: finalDuration,
+            sourceStart: 0,
+            timelinePosition: { start: recordingStartTime, end: recordingStartTime + finalDuration },
+            blobId: `blob_${screenId}`,
+            // Screen clip does NOT have the overlay rect (it's the full screen)
+          });
+        }
+      } else {
+        // Single track
+        const subTrack = source === 'screen' ? screenSubTrack : cameraSubTrack;
+        if (subTrack) {
+          const subId = nextId++;
+          childIds.push(subId);
+          newClips.push({
+            id: subId,
+            trackId: subTrack.id,
+            type: TrackType.VIDEO,
+            label: `${source === 'screen' ? 'Screen' : 'Camera'} ${new Date().toLocaleTimeString()}`,
+            videoUrl,
+            thumbnailUrl: `https://picsum.photos/seed/${subId}/200/120`,
+            duration: finalDuration,
+            sourceStart: 0,
+            timelinePosition: { start: recordingStartTime, end: recordingStartTime + finalDuration },
+            blobId: `blob_${subId}`,
+          });
+        }
+      }
+
+      // Add the placeholder clip to the parent track
+      newClips.push({
+        id: placeholderId,
+        trackId: targetTrack.id,
+        type: targetTrack.type,
+        label: `Group: ${new Date().toLocaleTimeString()}`,
+        duration: finalDuration,
+        sourceStart: 0,
+        timelinePosition: { start: recordingStartTime, end: recordingStartTime + finalDuration },
+        isPlaceholder: true,
+        childClipIds: childIds,
+      });
+    } else {
+      newClips.push({
+        id: baseId,
+        trackId: selectedTrackId,
+        type: targetTrack.type,
+        label: isImage ? `Photo ${new Date().toLocaleTimeString()}` : `Recording ${new Date().toLocaleTimeString()}`,
+        videoUrl: isImage ? undefined : videoUrl,
+        thumbnailUrl: isImage ? videoUrl : `https://picsum.photos/seed/${baseId}/200/120`,
+        duration: finalDuration,
+        sourceStart: 0,
+        timelinePosition: { start: recordingStartTime, end: recordingStartTime + finalDuration },
+        blobId: `blob_${baseId}`,
+      });
+    }
 
     // If in insert or append mode, shift all subsequent clips forward on the same track
     let updatedClips = [...clips];
     if (recordingMode === 'insert' || recordingMode === 'append') {
+      const targetTrackIds = newClips.map(c => c.trackId);
       updatedClips = updatedClips.map(clip => {
-        if (clip.trackId === selectedTrackId && clip.timelinePosition.start >= recordingStartTime) {
+        if (targetTrackIds.includes(clip.trackId) && clip.timelinePosition.start >= recordingStartTime) {
           return {
             ...clip,
             timelinePosition: {
@@ -558,7 +690,14 @@ export default function App() {
     setIsLoading(true);
     setLoadingMessage('Saving recording...');
     try {
-      await videoDB.saveClip(newClip, blob);
+      for (const clip of newClips) {
+        let clipBlob = blob;
+        if (multiRecordings) {
+          const rec = multiRecordings.find(r => r.url === clip.videoUrl);
+          if (rec) clipBlob = rec.blob;
+        }
+        await videoDB.saveClip(clip, clipBlob);
+      }
       setStorageError(null);
     } catch (err: any) {
       console.error("Failed to save recording to IndexedDB:", err);
@@ -573,9 +712,12 @@ export default function App() {
     }
 
     // Apply resolveOverlaps to handle any remaining edge cases (like clips that spanned the insertion point)
-    const finalClips = resolveOverlaps(newClip, [...updatedClips, newClip]);
+    let finalClips = [...updatedClips];
+    for (const clip of newClips) {
+      finalClips = resolveOverlaps(clip, [...finalClips, clip]);
+    }
     pushToHistory(finalClips);
-    setSelectedClipIds([newId]);
+    setSelectedClipIds(newClips.map(c => c.id));
   };
 
   const handleClipsUpdate = (updates: { id: number; newStart: number; newTrackId?: string }[]) => {
@@ -592,10 +734,29 @@ export default function App() {
 
     setClips((prev) => {
       let nextClips = [...prev];
-      const updateIds = updates.map(u => u.id);
+      const allUpdates = [...updates];
+      
+      // If a placeholder is being moved, its children should move too
+      updates.forEach(({ id, newStart }) => {
+        const clip = prev.find(c => c.id === id);
+        if (clip?.isPlaceholder && clip.childClipIds) {
+          const delta = newStart - clip.timelinePosition.start;
+          clip.childClipIds.forEach(childId => {
+            const childClip = prev.find(c => c.id === childId);
+            if (childClip) {
+              allUpdates.push({
+                id: childId,
+                newStart: childClip.timelinePosition.start + delta
+              });
+            }
+          });
+        }
+      });
+
+      const updateIds = allUpdates.map(u => u.id);
       const updatedClips: VideoClip[] = [];
 
-      updates.forEach(({ id, newStart, newTrackId }) => {
+      allUpdates.forEach(({ id, newStart, newTrackId }) => {
         const index = nextClips.findIndex(c => c.id === id);
         if (index !== -1) {
           const clip = nextClips[index];
@@ -624,29 +785,71 @@ export default function App() {
   };
 
   const handleAddTrack = (type: TrackType) => {
-    const newTrack: Track = {
-      id: `track-${Date.now()}`,
-      name: `${type.charAt(0).toUpperCase() + type.slice(1)} ${tracks.filter(t => t.type === type).length + 1}`,
+    const baseId = `track-${Date.now()}`;
+    const newTracks: Track[] = [{
+      id: baseId,
+      name: `${type.charAt(0).toUpperCase() + type.slice(1)} ${tracks.filter(t => t.type === type && !t.isSubTrack).length + 1}`,
       type,
       isVisible: true,
       isLocked: false,
       isMuted: false,
       isArmed: type === TrackType.VIDEO || type === TrackType.AUDIO || type === TrackType.SCREEN || type === TrackType.IMAGE,
       order: tracks.length,
-    };
-    setTracks([...tracks, newTrack]);
-    setSelectedTrackId(newTrack.id);
+    }];
+
+    if (type === TrackType.VIDEO || type === TrackType.SCREEN) {
+      newTracks.push({
+        id: `${baseId}-camera`,
+        name: 'Camera',
+        type: TrackType.VIDEO,
+        isVisible: true,
+        isLocked: false,
+        isMuted: false,
+        isArmed: true,
+        order: tracks.length + 1,
+        parentId: baseId,
+        isSubTrack: true,
+        subTrackType: 'camera'
+      });
+      newTracks.push({
+        id: `${baseId}-screen`,
+        name: 'Screen',
+        type: TrackType.VIDEO,
+        isVisible: true,
+        isLocked: false,
+        isMuted: false,
+        isArmed: true,
+        order: tracks.length + 2,
+        parentId: baseId,
+        isSubTrack: true,
+        subTrackType: 'screen'
+      });
+    }
+
+    setTracks([...tracks, ...newTracks]);
+    setSelectedTrackId(newTracks[0].id);
   };
 
   const handleDeleteTrack = (trackId: string) => {
     if (tracks.length <= 1) return;
-    const remainingTracks = tracks.filter(t => t.id !== trackId).map((t, i) => ({
+    
+    // Find all tracks to delete (parent and its sub-tracks)
+    const trackIdsToDelete = [trackId];
+    tracks.forEach(t => {
+      if (t.parentId === trackId) {
+        trackIdsToDelete.push(t.id);
+      }
+    });
+
+    const remainingTracks = tracks.filter(t => !trackIdsToDelete.includes(t.id)).map((t, i) => ({
       ...t,
       order: i
     }));
+    
     setTracks(remainingTracks);
-    setClips(clips.filter(c => c.trackId !== trackId));
-    if (selectedTrackId === trackId) {
+    setClips(clips.filter(c => !trackIdsToDelete.includes(c.trackId)));
+    
+    if (trackIdsToDelete.includes(selectedTrackId)) {
       setSelectedTrackId(remainingTracks[0]?.id || '');
     }
   };
@@ -655,30 +858,71 @@ export default function App() {
     const trackToDup = tracks.find(t => t.id === trackId);
     if (!trackToDup) return;
 
-    const newTrackId = `track-${Date.now()}`;
-    const newTrack: Track = {
+    const baseId = `track-${Date.now()}`;
+    const newTracks: Track[] = [{
       ...trackToDup,
-      id: newTrackId,
+      id: baseId,
       name: `${trackToDup.name} (Copy)`,
       order: tracks.length,
-    };
+    }];
 
-    const newClips = clips
-      .filter(c => c.trackId === trackId)
-      .map(c => ({
-        ...c,
-        id: Date.now() + Math.random(),
-        trackId: newTrackId,
-      }));
+    // Duplicate sub-tracks
+    const subTracks = tracks.filter(t => t.parentId === trackId);
+    subTracks.forEach((st, i) => {
+      newTracks.push({
+        ...st,
+        id: `${baseId}-${st.subTrackType}`,
+        parentId: baseId,
+        order: tracks.length + 1 + i
+      });
+    });
 
-    setTracks([...tracks, newTrack]);
+    const newClips: VideoClip[] = [];
+    newTracks.forEach(nt => {
+      const originalTrackId = nt.id === baseId ? trackId : subTracks.find(st => st.subTrackType === nt.subTrackType)?.id;
+      if (originalTrackId) {
+        clips.filter(c => c.trackId === originalTrackId).forEach(c => {
+          newClips.push({
+            ...c,
+            id: Date.now() + Math.random(),
+            trackId: nt.id,
+          });
+        });
+      }
+    });
+
+    setTracks([...tracks, ...newTracks]);
     pushToHistory([...clips, ...newClips]);
-    setSelectedTrackId(newTrackId);
+    setSelectedTrackId(baseId);
     setSelectedClipIds(newClips.map(c => c.id));
   };
 
   const handleUpdateTrack = (trackId: string, updates: Partial<Track>) => {
     setTracks(tracks.map(t => t.id === trackId ? { ...t, ...updates } : t));
+  };
+
+  const handleLutUpload = async (trackId: string, file: File) => {
+    setIsLoading(true);
+    setLoadingMessage(`Loading LUT: ${file.name}...`);
+    try {
+      // In a real app, we'd upload this to a server or store in IndexedDB
+      // For now, we'll use a local URL
+      const url = URL.createObjectURL(file);
+      handleUpdateTrack(trackId, {
+        lutConfig: {
+          url,
+          intensity: 1,
+          enabled: true,
+          name: file.name
+        }
+      });
+    } catch (err) {
+      console.error("Failed to load LUT:", err);
+      alert("Failed to load LUT file. Please ensure it is a valid .cube file.");
+    } finally {
+      setIsLoading(false);
+      setLoadingMessage('');
+    }
   };
 
   const handleAddTextClip = async (type: TrackType.TEXT | TrackType.SUBTITLE, startTimeOverride?: number, trackIdOverride?: string) => {
@@ -754,8 +998,7 @@ export default function App() {
       if (!clip) return prev;
 
       let updatedClip: VideoClip;
-
-      const isMedia = clip.type === TrackType.VIDEO || clip.type === TrackType.AUDIO;
+      const isMedia = clip.type === TrackType.VIDEO || clip.type === TrackType.AUDIO || clip.type === TrackType.SCREEN;
 
       if (side === 'left') {
         const maxStart = clip.timelinePosition.end - 0.1; // Min 0.1s duration
@@ -796,7 +1039,37 @@ export default function App() {
         };
       }
 
-      return resolveOverlaps(updatedClip, prev);
+      let updatedClips = prev.map(c => c.id === clipId ? updatedClip : c);
+
+      // Sync with children if it's a placeholder
+      if (updatedClip.isPlaceholder && updatedClip.childClipIds) {
+        updatedClips = updatedClips.map(c => {
+          if (updatedClip.childClipIds?.includes(c.id)) {
+            if (side === 'left') {
+              const delta = updatedClip.timelinePosition.start - clip.timelinePosition.start;
+              return {
+                ...c,
+                sourceStart: c.sourceStart + delta,
+                timelinePosition: {
+                  ...c.timelinePosition,
+                  start: updatedClip.timelinePosition.start,
+                }
+              };
+            } else {
+              return {
+                ...c,
+                timelinePosition: {
+                  ...c.timelinePosition,
+                  end: updatedClip.timelinePosition.end,
+                }
+              };
+            }
+          }
+          return c;
+        });
+      }
+
+      return resolveOverlaps(updatedClip, updatedClips);
     });
   };
 
@@ -823,9 +1096,10 @@ export default function App() {
         },
       };
 
+      const secondClipId = Math.max(...clips.map(c => c.id)) + 1;
       const secondClip = {
         ...clipToSplit,
-        id: Math.max(...clips.map(c => c.id)) + 1,
+        id: secondClipId,
         sourceStart: clipToSplit.sourceStart + offsetInClip,
         timelinePosition: {
           start: secondClipStart,
@@ -833,12 +1107,59 @@ export default function App() {
         },
       };
 
-      const newState = [
+      let newState = [
         ...clips.filter((c) => c.id !== clipToSplit.id),
         firstClip,
         secondClip,
-      ].sort((a, b) => a.timelinePosition.start - b.timelinePosition.start);
+      ];
 
+      // Sync with children if it's a placeholder
+      if (clipToSplit.isPlaceholder && clipToSplit.childClipIds) {
+        const firstChildIds: number[] = [];
+        const secondChildIds: number[] = [];
+        let nextId = Math.max(...newState.map(c => c.id)) + 1;
+
+        clipToSplit.childClipIds.forEach(childId => {
+          const childClip = clips.find(c => c.id === childId);
+          if (childClip) {
+            const firstChild = {
+              ...childClip,
+              timelinePosition: {
+                ...childClip.timelinePosition,
+                end: firstClipEnd,
+              },
+            };
+            const secondChildId = nextId++;
+            const secondChild = {
+              ...childClip,
+              id: secondChildId,
+              sourceStart: childClip.sourceStart + offsetInClip,
+              timelinePosition: {
+                start: secondClipStart,
+                end: childClip.timelinePosition.end,
+              },
+            };
+            
+            firstChildIds.push(childId);
+            secondChildIds.push(secondChildId);
+            
+            newState = [
+              ...newState.filter(c => c.id !== childId),
+              firstChild,
+              secondChild
+            ];
+          }
+        });
+
+        // Update placeholder child lists
+        newState = newState.map(c => {
+          if (c.id === firstClip.id) return { ...c, childClipIds: firstChildIds };
+          if (c.id === secondClip.id) return { ...c, childClipIds: secondChildIds };
+          return c;
+        });
+      }
+
+      newState.sort((a, b) => a.timelinePosition.start - b.timelinePosition.start);
       pushToHistory(newState);
       setSelectedClipIds([secondClip.id]);
     }
@@ -860,8 +1181,16 @@ export default function App() {
     clipsToDelete = clipsToDelete.filter(c => !isTrackLocked(c.trackId));
 
     if (clipsToDelete.length > 0) {
-      const deleteIds = clipsToDelete.map(c => c.id);
-      const newState = clips.filter((c) => !deleteIds.includes(c.id));
+      const deleteIds = new Set(clipsToDelete.map(c => c.id));
+      
+      // Add child clips of placeholders to delete list
+      clipsToDelete.forEach(clip => {
+        if (clip.isPlaceholder && clip.childClipIds) {
+          clip.childClipIds.forEach(id => deleteIds.add(id));
+        }
+      });
+
+      const newState = clips.filter((c) => !deleteIds.has(c.id));
 
       clipsToDelete.forEach(clip => {
         const otherClipsUsingBlob = newState.some(c => c.blobId === clip.blobId);
@@ -891,8 +1220,21 @@ export default function App() {
     if (clipsToDelete.length > 0) {
       let newState = [...clips];
 
+      // Add child clips of placeholders to delete list
+      const allToDelete = [...clipsToDelete];
+      clipsToDelete.forEach(clip => {
+        if (clip.isPlaceholder && clip.childClipIds) {
+          clip.childClipIds.forEach(id => {
+            const child = clips.find(c => c.id === id);
+            if (child && !allToDelete.some(c => c.id === id)) {
+              allToDelete.push(child);
+            }
+          });
+        }
+      });
+
       // Sort clips to delete by start time descending to shift correctly
-      const sortedToDelete = [...clipsToDelete].sort((a, b) => b.timelinePosition.start - a.timelinePosition.start);
+      const sortedToDelete = allToDelete.sort((a, b) => b.timelinePosition.start - a.timelinePosition.start);
 
       sortedToDelete.forEach(clip => {
         const duration = clip.timelinePosition.end - clip.timelinePosition.start;
@@ -935,11 +1277,27 @@ export default function App() {
     pushToHistory(newState);
   };
 
-  const handleClipUpdate = (clipId: number, updates: Partial<VideoClip>) => {
+  const handleClipUpdate = (clipId: number, updates: Partial<VideoClip>, isLive: boolean = false) => {
     const clip = clips.find(c => c.id === clipId);
     if (clip && isTrackLocked(clip.trackId)) return;
-    const newState = clips.map(c => c.id === clipId ? { ...c, ...updates } : c);
-    pushToHistory(newState);
+    
+    let newState = clips.map(c => c.id === clipId ? { ...c, ...updates } : c);
+
+    // Sync with children if it's a placeholder
+    if (clip?.isPlaceholder && clip.childClipIds) {
+      newState = newState.map(c => {
+        if (clip.childClipIds?.includes(c.id)) {
+          return { ...c, ...updates };
+        }
+        return c;
+      });
+    }
+
+    if (isLive) {
+      setClips(newState);
+    } else {
+      pushToHistory(newState);
+    }
   };
 
   const handleClipDownload = async (clip: VideoClip) => {
@@ -1415,6 +1773,20 @@ export default function App() {
             </button>
           </div>
 
+          <div className="flex items-center bg-white/5 rounded-md p-0.5 border border-white/10">
+            <button
+              onClick={() => setShowLutPreview(!showLutPreview)}
+              className={`flex items-center space-x-1.5 px-2.5 py-1 rounded-sm text-[10px] font-medium transition-all ${showLutPreview
+                ? 'bg-purple-600 text-white shadow-sm'
+                : 'text-gray-400 hover:text-gray-200'
+                }`}
+              title="Toggle LUT Preview (Performance intensive)"
+            >
+              <Palette size={12} />
+              <span>LUT Preview</span>
+            </button>
+          </div>
+
           <button
             onClick={handleImportClick}
             className="flex items-center space-x-2 bg-white/5 hover:bg-white/10 text-gray-300 px-3 py-1.5 rounded-md text-xs font-medium border border-white/10 transition-colors"
@@ -1596,6 +1968,7 @@ export default function App() {
                   tracks={tracks}
                   currentTime={currentTime}
                   isPlaying={isPlaying}
+                  showLutPreview={showLutPreview}
                 />
               </div>
             </div>
@@ -1632,6 +2005,7 @@ export default function App() {
             onTrackMove={handleMoveTrack}
             onTracksReorder={handleReorderTracks}
             onAddTrack={handleAddTrack}
+            onLutUpload={handleLutUpload}
             onAddTextClip={handleAddTextClip}
             currentTime={currentTime}
             onTimeChange={(time) => {

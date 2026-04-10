@@ -39,6 +39,9 @@ export interface VideoClip {
     saturation: number;
     contrast?: number;
   };
+  overlayRect?: { x: number; y: number; width: number; height: number };
+  isPlaceholder?: boolean;
+  childClipIds?: number[];
   style?: {
     fontSize?: number;
     fontWeight?: string | number;
@@ -60,8 +63,18 @@ export interface Track {
   isMuted: boolean;
   isArmed: boolean;
   order: number;
+  parentId?: string;
+  isSubTrack?: boolean;
+  subTrackType?: 'camera' | 'screen';
+  lutConfig?: {
+    url: string;
+    intensity: number;
+    enabled: boolean;
+    name?: string;
+  };
 }
 
 export type VideoObjType = VideoClip[];
 
 export type RecordingMode = 'insert' | 'append';
+export type RecordingSource = 'camera' | 'screen' | 'overlay';

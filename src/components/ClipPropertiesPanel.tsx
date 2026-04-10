@@ -10,7 +10,7 @@ import {
 
 interface ClipPropertiesPanelProps {
   clip: VideoClip;
-  onUpdate: (id: number, updates: Partial<VideoClip>) => void;
+  onUpdate: (id: number, updates: Partial<VideoClip>, isLive?: boolean) => void;
 }
 
 const GOOGLE_FONTS = [
@@ -51,26 +51,30 @@ export const ClipPropertiesPanel: React.FC<ClipPropertiesPanelProps> = ({ clip, 
   const filters = clip.filters || defaultFilters;
   const volume = clip.volume !== undefined ? clip.volume : 1;
 
-  const updateTransform = (updates: any) => {
+  const updateTransform = (updates: any, isLive: boolean = true) => {
     onUpdate(clip.id, {
       transform: { ...transform, ...updates }
-    });
+    }, isLive);
   };
 
-  const updateFilters = (updates: any) => {
+  const updateFilters = (updates: any, isLive: boolean = true) => {
     onUpdate(clip.id, {
       filters: { ...filters, ...updates }
-    });
+    }, isLive);
   };
 
-  const updateStyle = (updates: any) => {
+  const updateStyle = (updates: any, isLive: boolean = true) => {
     onUpdate(clip.id, {
       style: { ...clip.style, ...updates }
-    });
+    }, isLive);
   };
 
-  const updateVolume = (val: number) => {
-    onUpdate(clip.id, { volume: val });
+  const updateVolume = (val: number, isLive: boolean = true) => {
+    onUpdate(clip.id, { volume: val }, isLive);
+  };
+
+  const commit = () => {
+    onUpdate(clip.id, {}, false);
   };
 
   const resetTransform = () => {
@@ -104,12 +108,13 @@ export const ClipPropertiesPanel: React.FC<ClipPropertiesPanelProps> = ({ clip, 
               <AlignLeft size={14} className="text-gray-500" />
               <h3 className="text-[11px] font-bold text-gray-500 uppercase tracking-wider">Content</h3>
             </div>
-            <textarea
-              value={clip.content || ''}
-              onChange={(e) => onUpdate(clip.id, { content: e.target.value })}
-              className="w-full bg-gray-50 border border-gray-200 rounded-lg p-2 text-xs text-gray-900 focus:outline-none focus:ring-1 focus:ring-blue-500 transition-all min-h-[80px] resize-none"
-              placeholder="Enter text..."
-            />
+                <textarea
+                  value={clip.content || ''}
+                  onChange={(e) => onUpdate(clip.id, { content: e.target.value }, true)}
+                  onBlur={() => onUpdate(clip.id, { content: clip.content }, false)}
+                  className="w-full bg-gray-50 border border-gray-200 rounded-lg p-2 text-xs text-gray-900 focus:outline-none focus:ring-1 focus:ring-blue-500 transition-all min-h-[80px] resize-none"
+                  placeholder="Enter text..."
+                />
           </div>
         )}
 
@@ -126,7 +131,7 @@ export const ClipPropertiesPanel: React.FC<ClipPropertiesPanelProps> = ({ clip, 
                 <label className="text-[10px] text-gray-400 font-medium">Font Family</label>
                 <select
                   value={clip.style?.fontFamily || 'Inter'}
-                  onChange={(e) => updateStyle({ fontFamily: e.target.value })}
+                  onChange={(e) => updateStyle({ fontFamily: e.target.value }, false)}
                   className="w-full bg-gray-50 border border-gray-200 rounded px-2 py-1 text-xs text-gray-900 outline-none"
                 >
                   {GOOGLE_FONTS.map(font => (
@@ -145,7 +150,8 @@ export const ClipPropertiesPanel: React.FC<ClipPropertiesPanelProps> = ({ clip, 
                     type="range"
                     min="8" max="200"
                     value={clip.style?.fontSize || 48}
-                    onChange={(e) => updateStyle({ fontSize: parseInt(e.target.value) })}
+                    onChange={(e) => updateStyle({ fontSize: parseInt(e.target.value) }, true)}
+                    onMouseUp={commit}
                     className="w-full accent-blue-600"
                   />
                 </div>
@@ -153,7 +159,7 @@ export const ClipPropertiesPanel: React.FC<ClipPropertiesPanelProps> = ({ clip, 
                   <label className="text-[10px] text-gray-400 font-medium">Weight</label>
                   <select
                     value={clip.style?.fontWeight || 400}
-                    onChange={(e) => updateStyle({ fontWeight: e.target.value })}
+                    onChange={(e) => updateStyle({ fontWeight: e.target.value }, false)}
                     className="w-full bg-gray-50 border border-gray-200 rounded px-2 py-1 text-xs text-gray-900 outline-none"
                   >
                     <option value="100">Thin</option>
@@ -174,13 +180,15 @@ export const ClipPropertiesPanel: React.FC<ClipPropertiesPanelProps> = ({ clip, 
                     <input
                       type="color"
                       value={clip.style?.color || '#ffffff'}
-                      onChange={(e) => updateStyle({ color: e.target.value })}
+                      onChange={(e) => updateStyle({ color: e.target.value }, true)}
+                      onBlur={commit}
                       className="w-6 h-6 bg-transparent border-none cursor-pointer rounded overflow-hidden"
                     />
                     <input
                       type="text"
                       value={clip.style?.color || '#ffffff'}
-                      onChange={(e) => updateStyle({ color: e.target.value })}
+                      onChange={(e) => updateStyle({ color: e.target.value }, true)}
+                      onBlur={commit}
                       className="flex-grow bg-gray-50 border border-gray-200 rounded px-2 py-1 text-[10px] text-gray-900 font-mono outline-none"
                     />
                   </div>
@@ -191,7 +199,8 @@ export const ClipPropertiesPanel: React.FC<ClipPropertiesPanelProps> = ({ clip, 
                     type="number"
                     step="0.1"
                     value={clip.style?.lineHeight === 1.2 ? '' : clip.style?.lineHeight}
-                    onChange={(e) => updateStyle({ lineHeight: e.target.value === '' ? 1.2 : parseFloat(e.target.value) })}
+                    onChange={(e) => updateStyle({ lineHeight: e.target.value === '' ? 1.2 : parseFloat(e.target.value) }, true)}
+                    onBlur={commit}
                     onFocus={(e) => e.target.select()}
                     placeholder="1.2"
                     className="w-full bg-gray-50 border border-gray-200 rounded px-2 py-1 text-xs text-gray-900 outline-none"
@@ -204,7 +213,7 @@ export const ClipPropertiesPanel: React.FC<ClipPropertiesPanelProps> = ({ clip, 
                   <label className="text-[10px] text-gray-400 font-medium">Style</label>
                   <select
                     value={clip.style?.fontStyle || 'normal'}
-                    onChange={(e) => updateStyle({ fontStyle: e.target.value })}
+                    onChange={(e) => updateStyle({ fontStyle: e.target.value }, false)}
                     className="w-full bg-gray-50 border border-gray-200 rounded px-2 py-1 text-xs text-gray-900 outline-none"
                   >
                     <option value="normal">Normal</option>
@@ -216,7 +225,7 @@ export const ClipPropertiesPanel: React.FC<ClipPropertiesPanelProps> = ({ clip, 
                   <label className="text-[10px] text-gray-400 font-medium">Stretch</label>
                   <select
                     value={clip.style?.fontStretch || 'normal'}
-                    onChange={(e) => updateStyle({ fontStretch: e.target.value })}
+                    onChange={(e) => updateStyle({ fontStretch: e.target.value }, false)}
                     className="w-full bg-gray-50 border border-gray-200 rounded px-2 py-1 text-xs text-gray-900 outline-none"
                   >
                     <option value="normal">Normal</option>
@@ -252,7 +261,8 @@ export const ClipPropertiesPanel: React.FC<ClipPropertiesPanelProps> = ({ clip, 
                 <input 
                   type="number" 
                   value={transform.position.x === 0 ? '' : transform.position.x}
-                  onChange={(e) => updateTransform({ position: { ...transform.position, x: e.target.value === '' ? 0 : Number(e.target.value) } })}
+                  onChange={(e) => updateTransform({ position: { ...transform.position, x: e.target.value === '' ? 0 : Number(e.target.value) } }, true)}
+                  onBlur={commit}
                   onFocus={(e) => e.target.select()}
                   placeholder="0"
                   className="w-full px-2 py-1 text-xs text-gray-900 border border-gray-200 rounded focus:ring-1 focus:ring-blue-500 outline-none"
@@ -263,7 +273,8 @@ export const ClipPropertiesPanel: React.FC<ClipPropertiesPanelProps> = ({ clip, 
                 <input 
                   type="number" 
                   value={transform.position.y === 0 ? '' : transform.position.y}
-                  onChange={(e) => updateTransform({ position: { ...transform.position, y: e.target.value === '' ? 0 : Number(e.target.value) } })}
+                  onChange={(e) => updateTransform({ position: { ...transform.position, y: e.target.value === '' ? 0 : Number(e.target.value) } }, true)}
+                  onBlur={commit}
                   onFocus={(e) => e.target.select()}
                   placeholder="0"
                   className="w-full px-2 py-1 text-xs text-gray-900 border border-gray-200 rounded focus:ring-1 focus:ring-blue-500 outline-none"
@@ -274,7 +285,8 @@ export const ClipPropertiesPanel: React.FC<ClipPropertiesPanelProps> = ({ clip, 
                 <input 
                   type="number" 
                   value={transform.position.z === 0 ? '' : transform.position.z}
-                  onChange={(e) => updateTransform({ position: { ...transform.position, z: e.target.value === '' ? 0 : Number(e.target.value) } })}
+                  onChange={(e) => updateTransform({ position: { ...transform.position, z: e.target.value === '' ? 0 : Number(e.target.value) } }, true)}
+                  onBlur={commit}
                   onFocus={(e) => e.target.select()}
                   placeholder="0"
                   className="w-full px-2 py-1 text-xs text-gray-900 border border-gray-200 rounded focus:ring-1 focus:ring-blue-500 outline-none"
@@ -286,7 +298,8 @@ export const ClipPropertiesPanel: React.FC<ClipPropertiesPanelProps> = ({ clip, 
                   type="range" 
                   min="0.1" max="5" step="0.01"
                   value={transform.scale.x}
-                  onChange={(e) => updateTransform({ scale: { x: Number(e.target.value), y: Number(e.target.value) } })}
+                  onChange={(e) => updateTransform({ scale: { x: Number(e.target.value), y: Number(e.target.value) } }, true)}
+                  onMouseUp={commit}
                   className="w-full accent-blue-600"
                 />
               </div>
@@ -296,7 +309,8 @@ export const ClipPropertiesPanel: React.FC<ClipPropertiesPanelProps> = ({ clip, 
                   type="range" 
                   min="0" max="1" step="0.01"
                   value={transform.opacity}
-                  onChange={(e) => updateTransform({ opacity: Number(e.target.value) })}
+                  onChange={(e) => updateTransform({ opacity: Number(e.target.value) }, true)}
+                  onMouseUp={commit}
                   className="w-full accent-blue-600"
                 />
               </div>
@@ -321,14 +335,16 @@ export const ClipPropertiesPanel: React.FC<ClipPropertiesPanelProps> = ({ clip, 
                       type="range" 
                       min="-360" max="360" step="1"
                       value={transform.rotation}
-                      onChange={(e) => updateTransform({ rotation: Number(e.target.value) })}
+                      onChange={(e) => updateTransform({ rotation: Number(e.target.value) }, true)}
+                      onMouseUp={commit}
                       className="flex-grow accent-blue-600"
                     />
                     <input 
                       type="number" 
                       min="-360" max="360"
                       value={transform.rotation}
-                      onChange={(e) => updateTransform({ rotation: e.target.value === '' ? 0 : Number(e.target.value) })}
+                      onChange={(e) => updateTransform({ rotation: e.target.value === '' ? 0 : Number(e.target.value) }, true)}
+                      onBlur={commit}
                       onFocus={(e) => e.target.select()}
                       placeholder="0"
                       className="w-12 px-1 py-0.5 text-[10px] text-gray-900 border border-gray-200 rounded outline-none"
@@ -375,7 +391,8 @@ export const ClipPropertiesPanel: React.FC<ClipPropertiesPanelProps> = ({ clip, 
                     <input 
                       type="number" min="0" max="100"
                       value={transform.crop?.top === 0 ? '' : (transform.crop?.top || 0)}
-                      onChange={(e) => updateTransform({ crop: { ...(transform.crop || {top:0,right:0,bottom:0,left:0}), top: e.target.value === '' ? 0 : Number(e.target.value) } })}
+                      onChange={(e) => updateTransform({ crop: { ...(transform.crop || {top:0,right:0,bottom:0,left:0}), top: e.target.value === '' ? 0 : Number(e.target.value) } }, true)}
+                      onBlur={commit}
                       onFocus={(e) => e.target.select()}
                       placeholder="0"
                       className="w-full px-2 py-1 text-xs text-gray-900 border border-gray-200 rounded outline-none"
@@ -386,7 +403,8 @@ export const ClipPropertiesPanel: React.FC<ClipPropertiesPanelProps> = ({ clip, 
                     <input 
                       type="number" min="0" max="100"
                       value={transform.crop?.bottom === 0 ? '' : (transform.crop?.bottom || 0)}
-                      onChange={(e) => updateTransform({ crop: { ...(transform.crop || {top:0,right:0,bottom:0,left:0}), bottom: e.target.value === '' ? 0 : Number(e.target.value) } })}
+                      onChange={(e) => updateTransform({ crop: { ...(transform.crop || {top:0,right:0,bottom:0,left:0}), bottom: e.target.value === '' ? 0 : Number(e.target.value) } }, true)}
+                      onBlur={commit}
                       onFocus={(e) => e.target.select()}
                       placeholder="0"
                       className="w-full px-2 py-1 text-xs text-gray-900 border border-gray-200 rounded outline-none"
@@ -397,7 +415,8 @@ export const ClipPropertiesPanel: React.FC<ClipPropertiesPanelProps> = ({ clip, 
                     <input 
                       type="number" min="0" max="100"
                       value={transform.crop?.left === 0 ? '' : (transform.crop?.left || 0)}
-                      onChange={(e) => updateTransform({ crop: { ...(transform.crop || {top:0,right:0,bottom:0,left:0}), left: e.target.value === '' ? 0 : Number(e.target.value) } })}
+                      onChange={(e) => updateTransform({ crop: { ...(transform.crop || {top:0,right:0,bottom:0,left:0}), left: e.target.value === '' ? 0 : Number(e.target.value) } }, true)}
+                      onBlur={commit}
                       onFocus={(e) => e.target.select()}
                       placeholder="0"
                       className="w-full px-2 py-1 text-xs text-gray-900 border border-gray-200 rounded outline-none"
@@ -408,7 +427,8 @@ export const ClipPropertiesPanel: React.FC<ClipPropertiesPanelProps> = ({ clip, 
                     <input 
                       type="number" min="0" max="100"
                       value={transform.crop?.right === 0 ? '' : (transform.crop?.right || 0)}
-                      onChange={(e) => updateTransform({ crop: { ...(transform.crop || {top:0,right:0,bottom:0,left:0}), right: e.target.value === '' ? 0 : Number(e.target.value) } })}
+                      onChange={(e) => updateTransform({ crop: { ...(transform.crop || {top:0,right:0,bottom:0,left:0}), right: e.target.value === '' ? 0 : Number(e.target.value) } }, true)}
+                      onBlur={commit}
                       onFocus={(e) => e.target.select()}
                       placeholder="0"
                       className="w-full px-2 py-1 text-xs text-gray-900 border border-gray-200 rounded outline-none"
@@ -447,7 +467,8 @@ export const ClipPropertiesPanel: React.FC<ClipPropertiesPanelProps> = ({ clip, 
                   type="range" 
                   min="0" max="2" step="0.01"
                   value={filters.brightness}
-                  onChange={(e) => updateFilters({ brightness: Number(e.target.value) })}
+                  onChange={(e) => updateFilters({ brightness: Number(e.target.value) }, true)}
+                  onMouseUp={commit}
                   className="w-full accent-blue-600"
                 />
               </div>
@@ -461,7 +482,8 @@ export const ClipPropertiesPanel: React.FC<ClipPropertiesPanelProps> = ({ clip, 
                   type="range" 
                   min="0" max="2" step="0.01"
                   value={filters.saturation}
-                  onChange={(e) => updateFilters({ saturation: Number(e.target.value) })}
+                  onChange={(e) => updateFilters({ saturation: Number(e.target.value) }, true)}
+                  onMouseUp={commit}
                   className="w-full accent-blue-600"
                 />
               </div>
@@ -475,7 +497,8 @@ export const ClipPropertiesPanel: React.FC<ClipPropertiesPanelProps> = ({ clip, 
                   type="range" 
                   min="0" max="2" step="0.01"
                   value={filters.contrast || 1}
-                  onChange={(e) => updateFilters({ contrast: Number(e.target.value) })}
+                  onChange={(e) => updateFilters({ contrast: Number(e.target.value) }, true)}
+                  onMouseUp={commit}
                   className="w-full accent-blue-600"
                 />
               </div>
@@ -499,7 +522,8 @@ export const ClipPropertiesPanel: React.FC<ClipPropertiesPanelProps> = ({ clip, 
                 type="range" 
                 min="0" max="1" step="0.01"
                 value={volume}
-                onChange={(e) => updateVolume(Number(e.target.value))}
+                onChange={(e) => updateVolume(Number(e.target.value), true)}
+                onMouseUp={commit}
                 className="w-full accent-blue-600"
               />
             </div>
