@@ -36,8 +36,8 @@ const MOCK_CLIPS: VideoObjType = [
     duration: 10,
     sourceStart: 0,
     timelinePosition: {
-      start: 2,
-      end: 12,
+      start: 0,
+      end: 10,
     }
   },
   {
@@ -50,8 +50,8 @@ const MOCK_CLIPS: VideoObjType = [
     duration: 15,
     sourceStart: 0,
     timelinePosition: {
-      start: 15,
-      end: 30,
+      start: 10,
+      end: 25,
     }
   }
 ];
@@ -88,6 +88,16 @@ export default function App() {
   const [isPlaying, setIsPlaying] = useState(false);
   const playbackRef = useRef<number | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const lutWorkerRef = useRef<Worker | null>(null);
+
+  useEffect(() => {
+    // Initialize LUT worker
+    lutWorkerRef.current = new Worker(new URL('./lib/lut.worker.ts', import.meta.url), { type: 'module' });
+    
+    return () => {
+      lutWorkerRef.current?.terminate();
+    };
+  }, []);
 
   useEffect(() => {
     const maxEnd = Math.max(60, ...clips.map(c => c.timelinePosition.end));
@@ -902,23 +912,44 @@ export default function App() {
   };
 
   const handleLutUpload = async (trackId: string, file: File) => {
+    if (!lutWorkerRef.current) return;
+
     setIsLoading(true);
-    setLoadingMessage(`Loading LUT: ${file.name}...`);
+    setLoadingMessage(`Parsing LUT: ${file.name}...`);
+
     try {
-      // In a real app, we'd upload this to a server or store in IndexedDB
-      // For now, we'll use a local URL
-      const url = URL.createObjectURL(file);
+      const cubeString = await file.text();
+      
+      const lutData = await new Promise<any>((resolve, reject) => {
+        const onMessage = (e: MessageEvent) => {
+          if (e.data.type === 'LUT_PARSED') {
+            lutWorkerRef.current?.removeEventListener('message', onMessage);
+            lutWorkerRef.current?.removeEventListener('error', onError);
+            resolve(e.data.data);
+          }
+        };
+        const onError = (e: ErrorEvent) => {
+          lutWorkerRef.current?.removeEventListener('message', onMessage);
+          lutWorkerRef.current?.removeEventListener('error', onError);
+          reject(e);
+        };
+        lutWorkerRef.current?.addEventListener('message', onMessage);
+        lutWorkerRef.current?.addEventListener('error', onError);
+        lutWorkerRef.current?.postMessage({ type: 'PARSE_LUT', cubeString });
+      });
+
       handleUpdateTrack(trackId, {
         lutConfig: {
-          url,
+          url: URL.createObjectURL(file),
           intensity: 1,
           enabled: true,
-          name: file.name
+          name: file.name,
+          data: lutData
         }
       });
     } catch (err) {
-      console.error("Failed to load LUT:", err);
-      alert("Failed to load LUT file. Please ensure it is a valid .cube file.");
+      console.error("Failed to parse LUT:", err);
+      alert("Failed to parse LUT file. Please ensure it is a valid .cube file.");
     } finally {
       setIsLoading(false);
       setLoadingMessage('');

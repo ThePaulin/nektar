@@ -9,6 +9,29 @@ interface ThumbnailStripProps {
 }
 
 const thumbnailCache: { [key: string]: string } = {};
+const MAX_CONCURRENT_GENERATORS = 2;
+let activeGenerators = 0;
+const generatorQueue: (() => void)[] = [];
+
+const requestGenerator = () => {
+  return new Promise<void>(resolve => {
+    if (activeGenerators < MAX_CONCURRENT_GENERATORS) {
+      activeGenerators++;
+      resolve();
+    } else {
+      generatorQueue.push(resolve);
+    }
+  });
+};
+
+const releaseGenerator = () => {
+  activeGenerators--;
+  if (generatorQueue.length > 0) {
+    const next = generatorQueue.shift();
+    activeGenerators++;
+    next?.();
+  }
+};
 
 export const ThumbnailStrip: React.FC<ThumbnailStripProps> = ({
   videoUrl,
@@ -26,6 +49,12 @@ export const ThumbnailStrip: React.FC<ThumbnailStripProps> = ({
     const generatedThumbnails: string[] = [];
 
     const generate = async () => {
+      await requestGenerator();
+      if (!isMounted) {
+        releaseGenerator();
+        return;
+      }
+
       const video = document.createElement('video');
       video.src = videoUrl;
       video.crossOrigin = 'anonymous';
@@ -37,6 +66,12 @@ export const ThumbnailStrip: React.FC<ThumbnailStripProps> = ({
           video.onloadedmetadata = resolve;
           video.onerror = reject;
         });
+
+        const canvas = document.createElement('canvas');
+        const scale = 0.15; // Even smaller for better performance
+        canvas.width = video.videoWidth * scale;
+        canvas.height = video.videoHeight * scale;
+        const ctx = canvas.getContext('2d', { alpha: false });
 
         for (let i = 0; i < count; i++) {
           if (!isMounted) break;
@@ -53,16 +88,12 @@ export const ThumbnailStrip: React.FC<ThumbnailStripProps> = ({
               video.onseeked = resolve;
             });
 
-            const canvas = document.createElement('canvas');
-            const scale = 0.2; // Small thumbnails for performance
-            canvas.width = video.videoWidth * scale;
-            canvas.height = video.videoHeight * scale;
-            const ctx = canvas.getContext('2d');
-            ctx?.drawImage(video, 0, 0, canvas.width, canvas.height);
-            
-            const dataUrl = canvas.toDataURL('image/jpeg', 0.6);
-            thumbnailCache[cacheKey] = dataUrl;
-            generatedThumbnails.push(dataUrl);
+            if (ctx) {
+              ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+              const dataUrl = canvas.toDataURL('image/jpeg', 0.5);
+              thumbnailCache[cacheKey] = dataUrl;
+              generatedThumbnails.push(dataUrl);
+            }
           }
           
           if (isMounted) {
@@ -70,14 +101,14 @@ export const ThumbnailStrip: React.FC<ThumbnailStripProps> = ({
           }
         }
       } catch (error) {
-        console.warn('Failed to generate thumbnails from video, falling back to placeholders:', error);
-        // Fallback to placeholder images with different seeds to look like keyframes
+        console.warn('Failed to generate thumbnails from video:', error);
         const fallbacks = Array.from({ length: count }).map((_, i) => 
           `https://picsum.photos/seed/${videoUrl.split('/').pop()}-${i}/200/120`
         );
         if (isMounted) setThumbnails(fallbacks);
       } finally {
         video.remove();
+        releaseGenerator();
       }
     };
 

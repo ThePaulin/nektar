@@ -54,6 +54,11 @@ export interface VideoClip {
   };
 }
 
+export interface LUTData {
+  size: number;
+  data: Float32Array;
+}
+
 export interface Track {
   id: string;
   name: string;
@@ -71,6 +76,7 @@ export interface Track {
     intensity: number;
     enabled: boolean;
     name?: string;
+    data?: LUTData;
   };
 }
 

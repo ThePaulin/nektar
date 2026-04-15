@@ -501,12 +501,14 @@ export const ExportDialog: React.FC<ExportDialogProps> = ({ clips, tracks, total
           setProgress(10 + ((i + 1) / totalFrames) * 90);
         }
 
-        // 4a. Prefetch next frame's seeks while rendering current
-        if (i < totalFrames - 1) {
-          const nextActualTime = Math.round((exportRange.start + (i + 1) * frameDuration) * 100) / 100;
-          const nextActiveClips = exportClips.filter(c => nextActualTime >= c.timelinePosition.start && nextActualTime < c.timelinePosition.end);
-          // Trigger seeks in background (don't await yet)
-          nextActiveClips.filter(c => c.type === TrackType.VIDEO).forEach(c => seekClip(c as VideoClip, nextActualTime));
+        // 4a. Prefetch next frames' seeks while rendering current
+        // Look ahead 3 frames to hide more latency
+        for (let lookAhead = 1; lookAhead <= 3; lookAhead++) {
+          if (i + lookAhead < totalFrames) {
+            const nextActualTime = Math.round((exportRange.start + (i + lookAhead) * frameDuration) * 100) / 100;
+            const nextActiveClips = exportClips.filter(c => nextActualTime >= c.timelinePosition.start && nextActualTime < c.timelinePosition.end);
+            nextActiveClips.filter(c => c.type === TrackType.VIDEO || c.type === TrackType.SCREEN).forEach(c => seekClip(c as VideoClip, nextActualTime));
+          }
         }
         
         // 4b. Composite Frame
@@ -705,11 +707,13 @@ export const ExportDialog: React.FC<ExportDialogProps> = ({ clips, tracks, total
         // 4c. Encode frame and audio
         const timestamp = Math.round(i * frameDuration * 1000000);
         try {
-          const bitmap = await createImageBitmap(offscreenCanvas);
-          const frame = new VideoFrame(bitmap, { timestamp, duration: Math.round(frameDuration * 1000000) });
+          // Optimization: Use VideoFrame directly from canvas if possible
+          const frame = new VideoFrame(offscreenCanvas, { 
+            timestamp, 
+            duration: Math.round(frameDuration * 1000000) 
+          });
           videoEncoder.encode(frame);
           frame.close();
-          bitmap.close();
           if (i % 100 === 0) console.log(`[Export] Encoded frame ${i}/${totalFrames}`);
         } catch (encodeError) {
           console.error("[Export] Frame encoding failed at timestamp", timestamp, encodeError);

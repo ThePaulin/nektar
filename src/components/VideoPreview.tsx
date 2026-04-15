@@ -1,7 +1,7 @@
 import React, { useRef, useEffect, useMemo, useState, useCallback } from 'react';
-import { VideoObjType, VideoClip, Track, TrackType } from '../types';
-import { parseCubeLUT, createHaldLUTCanvas } from '../lib/lut';
+import { VideoObjType, VideoClip, Track, TrackType, LUTData } from '../types';
 import { WebGLLUT } from '../lib/webgl-lut';
+import { WebGPURenderer } from '../lib/renderer-webgpu';
 
 interface VideoPreviewProps {
   clips: VideoObjType;
@@ -11,90 +11,104 @@ interface VideoPreviewProps {
   showLutPreview?: boolean;
 }
 
-export const VideoPreview: React.FC<VideoPreviewProps> = ({ clips, tracks, currentTime, isPlaying, showLutPreview = false }) => {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const videoRefs = useRef<{ [key: number]: HTMLVideoElement | null }>({});
-  const imageRefs = useRef<{ [key: number]: HTMLImageElement | null }>({});
+const PLAYBACK_WIDTH = 1280;
+const PLAYBACK_HEIGHT = 720;
+const BUFFER_WINDOW = 15; // Reduced from 30 to 15 to save memory/decoders
+
+export const VideoPreview: React.FC<VideoPreviewProps> = ({ 
+  clips, 
+  tracks, 
+  currentTime, 
+  isPlaying, 
+  showLutPreview = true 
+}) => {
   const containerRef = useRef<HTMLDivElement>(null);
-  const [containerWidth, setContainerWidth] = useState(1280);
-  const requestRef = useRef<number>();
-  const [lutDataMap, setLutDataMap] = useState<{ [key: string]: { url: string, size: number, data: Float32Array } }>({});
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const videoRefs = useRef<{ [key: string]: HTMLVideoElement | null }>({});
+  const imageRefs = useRef<{ [key: string]: HTMLImageElement | null }>({});
+  const requestRef = useRef<number>(0);
   const webglLutRef = useRef<WebGLLUT | null>(null);
+  const webgpuRendererRef = useRef<WebGPURenderer | null>(null);
+  const [useWebGPU, setUseWebGPU] = useState(false);
+  const [lutTextures, setLutTextures] = useState<{ [key: string]: any }>({});
+  const [offscreenCanvas, setOffscreenCanvas] = useState<HTMLCanvasElement | null>(null);
   const lutProcessingCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
-  // Load LUTs
-  useEffect(() => {
-    const loadLuts = async () => {
-      const tracksWithLut = tracks.filter(t => t.lutConfig?.enabled && t.lutConfig.url);
-      const newLutDataMap: { [key: string]: { url: string, size: number, data: Float32Array } } = {};
-      
-      await Promise.all(tracksWithLut.map(async (track) => {
-        const url = track.lutConfig!.url!;
-        if (lutDataMap[track.id]?.url === url) {
-          newLutDataMap[track.id] = lutDataMap[track.id];
-          return;
-        }
-        try {
-          const response = await fetch(url);
-          const cubeString = await response.text();
-          const lutData = parseCubeLUT(cubeString);
-          newLutDataMap[track.id] = { url, size: lutData.size, data: lutData.data };
-        } catch (e) {
-          console.warn(`[Preview] Failed to load LUT for track ${track.id}:`, e);
-        }
-      }));
-      
-      setLutDataMap(newLutDataMap);
-    };
-    loadLuts();
+  const lutDataMap = useMemo(() => {
+    const map: { [key: string]: LUTData } = {};
+    tracks.forEach(track => {
+      if (track.lutConfig?.data) {
+        map[track.id] = track.lutConfig.data;
+      }
+    });
+    return map;
   }, [tracks]);
 
-  // Initialize WebGL LUT processor
+  // Initialize renderers
   useEffect(() => {
-    if (!lutProcessingCanvasRef.current) {
-      lutProcessingCanvasRef.current = document.createElement('canvas');
-      lutProcessingCanvasRef.current.width = 854;
-      lutProcessingCanvasRef.current.height = 480;
-    }
-    if (!webglLutRef.current && lutProcessingCanvasRef.current) {
-      webglLutRef.current = new WebGLLUT(lutProcessingCanvasRef.current);
-    }
+    const initRenderers = async () => {
+      console.log("Initializing renderers, canvasRef:", !!canvasRef.current);
+      
+      // Always initialize offscreen canvas for fallback
+      const offscreen = document.createElement('canvas');
+      offscreen.width = PLAYBACK_WIDTH;
+      offscreen.height = PLAYBACK_HEIGHT;
+      setOffscreenCanvas(offscreen);
+
+      if (canvasRef.current) {
+        try {
+          const renderer = new WebGPURenderer();
+          const success = await renderer.init(canvasRef.current);
+          console.log("WebGPU initialization success:", success);
+          if (success) {
+            webgpuRendererRef.current = renderer;
+            setUseWebGPU(true);
+            console.log("WebGPU Preview Renderer initialized");
+          } else {
+            // Fallback to WebGL for LUTs
+            const lutCanvas = document.createElement('canvas');
+            lutCanvas.width = PLAYBACK_WIDTH;
+            lutCanvas.height = PLAYBACK_HEIGHT;
+            lutProcessingCanvasRef.current = lutCanvas;
+            webglLutRef.current = new WebGLLUT(lutCanvas);
+            console.log("WebGL LUT Fallback initialized");
+          }
+        } catch (e) {
+          console.error("Renderer initialization error:", e);
+        }
+      }
+    };
+    initRenderers();
   }, []);
 
-  // Offscreen buffer for flicker-free rendering
-  const offscreenCanvas = useMemo(() => {
-    if (typeof document === 'undefined') return null;
-    const canvas = document.createElement('canvas');
-    canvas.width = 854; // PLAYBACK_WIDTH
-    canvas.height = 480; // PLAYBACK_HEIGHT
-    return canvas;
-  }, []);
+  // Update LUT textures when LUT data changes
+  useEffect(() => {
+    if (useWebGPU && webgpuRendererRef.current) {
+      const newTextures: { [key: string]: any } = {};
+      Object.entries(lutDataMap).forEach(([trackId, data]) => {
+        const texture = webgpuRendererRef.current!.createLutTexture(data);
+        if (texture) newTextures[trackId] = texture;
+      });
+      setLutTextures(newTextures);
+    }
+  }, [lutDataMap, useWebGPU]);
 
-  // Playback resolution (optimized for performance)
-  const PLAYBACK_WIDTH = 854;
-  const PLAYBACK_HEIGHT = 480;
-  
-  // Reference width for scaling (matches export resolution)
-  const REFERENCE_WIDTH = 1280;
-  const REFERENCE_HEIGHT = 720;
-  const scaleFactor = containerWidth / REFERENCE_WIDTH;
-
-  // Windowed media pool: only load clips near the playhead to save memory/CPU
-  const BUFFER_WINDOW = 30; // 30 seconds
-  const pooledClips = useMemo(() => {
-    return clips.filter(clip => 
-      currentTime >= clip.timelinePosition.start - BUFFER_WINDOW &&
-      currentTime <= clip.timelinePosition.end + BUFFER_WINDOW
-    );
-  }, [clips, currentTime]);
-
+  // Handle container resize
   useEffect(() => {
     if (!containerRef.current) return;
-    const observer = new ResizeObserver((entries) => {
-      for (const entry of entries) {
-        if (entry.contentRect.width > 0) {
-          setContainerWidth(entry.contentRect.width);
-        }
+    const observer = new ResizeObserver(() => {
+      if (!containerRef.current || !canvasRef.current) return;
+      const container = containerRef.current;
+      const canvas = canvasRef.current;
+      const containerAspect = container.clientWidth / container.clientHeight;
+      const videoAspect = PLAYBACK_WIDTH / PLAYBACK_HEIGHT;
+
+      if (containerAspect > videoAspect) {
+        canvas.style.height = '100%';
+        canvas.style.width = 'auto';
+      } else {
+        canvas.style.width = '100%';
+        canvas.style.height = 'auto';
       }
     });
     observer.observe(containerRef.current);
@@ -117,11 +131,36 @@ export const VideoPreview: React.FC<VideoPreviewProps> = ({ clips, tracks, curre
 
   // Main rendering loop
   const render = useCallback((force = false) => {
+    if (useWebGPU && webgpuRendererRef.current) {
+      try {
+        webgpuRendererRef.current.render(
+          activeClips,
+          tracks,
+          videoRefs.current,
+          imageRefs.current,
+          lutTextures,
+          showLutPreview
+        );
+      } catch (e) {
+        console.error("WebGPU render error:", e);
+        setUseWebGPU(false); // Fallback to Canvas2D
+      }
+      return;
+    }
+
     const canvas = canvasRef.current;
-    if (!canvas || !offscreenCanvas) return;
+    if (!canvas || !offscreenCanvas) {
+      if (isPlaying) console.log("Missing canvas or offscreenCanvas", !!canvas, !!offscreenCanvas);
+      return;
+    }
     const ctx = canvas.getContext('2d', { alpha: false });
     const oCtx = offscreenCanvas.getContext('2d', { alpha: false });
     if (!ctx || !oCtx) return;
+
+    if (offscreenCanvas.width !== PLAYBACK_WIDTH) {
+      offscreenCanvas.width = PLAYBACK_WIDTH;
+      offscreenCanvas.height = PLAYBACK_HEIGHT;
+    }
 
     // Draw to offscreen buffer first
     oCtx.fillStyle = '#000000';
@@ -149,35 +188,23 @@ export const VideoPreview: React.FC<VideoPreviewProps> = ({ clips, tracks, curre
         ? transform.rotation 
         : (transform.rotation as any)?.z || 0;
 
-      const filters = clip.filters || { brightness: 1, saturation: 1, contrast: 1 };
-
       oCtx.save();
-      oCtx.globalAlpha = transform.opacity;
-
-      if (filters.brightness !== 1 || filters.saturation !== 1 || (filters.contrast !== undefined && filters.contrast !== 1)) {
-        oCtx.filter = `brightness(${filters.brightness}) saturate(${filters.saturation}) contrast(${filters.contrast || 1})`;
-      }
-
-      const scaleX_res = PLAYBACK_WIDTH / REFERENCE_WIDTH;
-      const scaleY_res = PLAYBACK_HEIGHT / REFERENCE_HEIGHT;
-
-      oCtx.translate(
-        (transform.position.x * scaleX_res) + (PLAYBACK_WIDTH / 2),
-        (transform.position.y * scaleY_res) + (PLAYBACK_HEIGHT / 2)
-      );
-      
-      oCtx.rotate(rotation * Math.PI / 180);
+      oCtx.translate(PLAYBACK_WIDTH / 2 + (transform.position.x || 0), PLAYBACK_HEIGHT / 2 + (transform.position.y || 0));
+      oCtx.rotate((rotation * Math.PI) / 180);
       oCtx.scale(
-        transform.scale.x * (transform.flipHorizontal ? -1 : 1),
-        transform.scale.y * (transform.flipVertical ? -1 : 1)
+        (transform.scale?.x || 1) * (transform.flipHorizontal ? -1 : 1),
+        (transform.scale?.y || 1) * (transform.flipVertical ? -1 : 1)
       );
+      oCtx.globalAlpha = transform.opacity ?? 1;
 
       if (clip.type === TrackType.VIDEO || clip.type === TrackType.SCREEN) {
         const video = videoRefs.current[clip.id];
-        // Lower readyState requirement when paused to show frames while seeking
-        const isReady = video && (isPlaying ? video.readyState >= 2 : video.readyState >= 1 && video.videoWidth > 0);
+        const hasError = !!video?.error;
         
-        if (isReady) {
+        const isReady = video && (video.readyState >= 1 || hasError) && (video.videoWidth > 0 || hasError);
+        const isPerfectlyReady = video && video.readyState >= 2;
+        
+        if (isReady && !hasError) {
           const crop = transform.crop || { top: 0, right: 0, bottom: 0, left: 0 };
           const sx = (crop.left / 100) * video.videoWidth;
           const sy = (crop.top / 100) * video.videoHeight;
@@ -189,11 +216,9 @@ export const VideoPreview: React.FC<VideoPreviewProps> = ({ clips, tracks, curre
           const lutData = lutDataMap[effectiveTrack.id];
           
           if (showLutPreview && effectiveTrack.lutConfig?.enabled && lutData && webglLutRef.current) {
-            // Apply LUT using WebGL
             const isCameraSubTrack = track.isSubTrack && track.subTrackType === 'camera';
             const isStandardVideo = !track.isSubTrack && track.type === TrackType.VIDEO;
             
-            // Only apply LUT to camera sub-track or standard video tracks
             if (isCameraSubTrack || isStandardVideo) {
               const isScreen = clip.type === TrackType.SCREEN;
               const hasOverlay = !!clip.overlayRect;
@@ -205,7 +230,7 @@ export const VideoPreview: React.FC<VideoPreviewProps> = ({ clips, tracks, curre
                 if (hasOverlay) {
                   useRect = true;
                 } else {
-                  shouldApply = false; // Ignore screen recordings without overlay
+                  shouldApply = false;
                 }
               }
 
@@ -224,13 +249,14 @@ export const VideoPreview: React.FC<VideoPreviewProps> = ({ clips, tracks, curre
                 oCtx.drawImage(video, sx, sy, sw, sh, -PLAYBACK_WIDTH/2, -PLAYBACK_HEIGHT/2, PLAYBACK_WIDTH, PLAYBACK_HEIGHT);
               }
             } else {
-              // Screen sub-track or other: no LUT
               oCtx.drawImage(video, sx, sy, sw, sh, -PLAYBACK_WIDTH/2, -PLAYBACK_HEIGHT/2, PLAYBACK_WIDTH, PLAYBACK_HEIGHT);
             }
           } else {
             oCtx.drawImage(video, sx, sy, sw, sh, -PLAYBACK_WIDTH/2, -PLAYBACK_HEIGHT/2, PLAYBACK_WIDTH, PLAYBACK_HEIGHT);
           }
-        } else if (clip.type === TrackType.VIDEO || clip.type === TrackType.SCREEN) {
+        }
+        
+        if (!hasError && !isPerfectlyReady) {
           allVideosReady = false;
         }
       } else if (clip.type === TrackType.IMAGE) {
@@ -245,7 +271,7 @@ export const VideoPreview: React.FC<VideoPreviewProps> = ({ clips, tracks, curre
         }
       } else if (clip.type === TrackType.TEXT || clip.type === TrackType.SUBTITLE) {
         const baseFontSize = clip.style?.fontSize || 48;
-        const playbackFontSize = baseFontSize * (PLAYBACK_WIDTH / REFERENCE_WIDTH);
+        const playbackFontSize = baseFontSize * (PLAYBACK_WIDTH / 1280);
         
         oCtx.font = `${clip.style?.fontWeight || 'normal'} ${playbackFontSize}px ${clip.style?.fontFamily || 'sans-serif'}`;
         oCtx.fillStyle = clip.style?.color || '#ffffff';
@@ -255,27 +281,24 @@ export const VideoPreview: React.FC<VideoPreviewProps> = ({ clips, tracks, curre
         if (clip.type === TrackType.SUBTITLE || (clip.style?.backgroundColor && clip.style.backgroundColor !== 'transparent')) {
           const textWidth = oCtx.measureText(clip.content || '').width;
           oCtx.fillStyle = clip.style?.backgroundColor || 'rgba(0,0,0,0.6)';
-          const paddingX = 16 * (PLAYBACK_WIDTH / REFERENCE_WIDTH);
-          const paddingY = 8 * (PLAYBACK_WIDTH / REFERENCE_WIDTH);
+          const paddingX = 16 * (PLAYBACK_WIDTH / 1280);
+          const paddingY = 8 * (PLAYBACK_WIDTH / 1280);
           
           oCtx.fillRect(-textWidth/2 - paddingX, -playbackFontSize/2 - paddingY, textWidth + paddingX*2, playbackFontSize + paddingY*2);
           oCtx.fillStyle = clip.style?.color || '#ffffff';
         }
         
-        const offsetY = clip.type === TrackType.SUBTITLE ? (REFERENCE_HEIGHT/2 - 80) * (PLAYBACK_HEIGHT/REFERENCE_HEIGHT) : 0;
+        const offsetY = clip.type === TrackType.SUBTITLE ? (720/2 - 80) * (PLAYBACK_HEIGHT/720) : 0;
         oCtx.fillText(clip.content || '', 0, offsetY);
       }
 
       oCtx.restore();
     });
 
-    // Atomic update: only copy to main canvas if we're playing (best effort)
-    // or if we're paused and all videos are ready (perfect frame)
-    // or if forced (e.g. scrubbing)
-    if (isPlaying || allVideosReady || force) {
+    if (isPlaying || allVideosReady || force || activeClips.length > 0) {
       ctx.drawImage(offscreenCanvas, 0, 0);
     }
-  }, [activeClips, tracks, isPlaying, offscreenCanvas, lutDataMap, showLutPreview]);
+  }, [activeClips, tracks, isPlaying, offscreenCanvas, lutDataMap, showLutPreview, useWebGPU, lutTextures]);
 
   // Force a render when any video element is ready
   const handleVideoReady = useCallback(() => {
@@ -297,9 +320,7 @@ export const VideoPreview: React.FC<VideoPreviewProps> = ({ clips, tracks, curre
 
       if (isActive && track) {
         const localTime = (currentTime - clip.timelinePosition.start) + clip.sourceStart;
-
-        // Use a larger drift threshold during playback to avoid redundant seeks
-        const threshold = isPlaying ? 0.3 : 0.05;
+        const threshold = isPlaying ? 0.2 : 0.03; // Slightly looser threshold during playback
         if (Math.abs(video.currentTime - localTime) > threshold) {
           video.currentTime = localTime;
         }
@@ -323,17 +344,21 @@ export const VideoPreview: React.FC<VideoPreviewProps> = ({ clips, tracks, curre
       }
     });
 
-    // If paused, trigger a render
     if (!isPlaying) {
       render(true);
     }
   }, [activeClips, currentTime, isPlaying, clips, tracks, render]);
 
+  const renderRef = useRef(render);
+  useEffect(() => {
+    renderRef.current = render;
+  }, [render]);
+
   useEffect(() => {
     let active = true;
     const loop = () => {
       if (!active) return;
-      render();
+      renderRef.current();
       if (isPlaying) {
         requestRef.current = requestAnimationFrame(loop);
       }
@@ -347,7 +372,14 @@ export const VideoPreview: React.FC<VideoPreviewProps> = ({ clips, tracks, curre
       active = false;
       if (requestRef.current) cancelAnimationFrame(requestRef.current);
     };
-  }, [isPlaying, render]);
+  }, [isPlaying]);
+
+  const pooledClips = useMemo(() => {
+    return clips.filter(clip => 
+      currentTime >= clip.timelinePosition.start - BUFFER_WINDOW &&
+      currentTime <= clip.timelinePosition.end + BUFFER_WINDOW
+    );
+  }, [clips, currentTime]);
 
   return (
     <div 
@@ -361,16 +393,16 @@ export const VideoPreview: React.FC<VideoPreviewProps> = ({ clips, tracks, curre
         className="w-full h-full object-contain"
       />
 
-      {/* Playback Quality Badge */}
       <div className="absolute top-3 right-3 z-[110] pointer-events-none">
         <div className="bg-black/60 backdrop-blur-md border border-white/10 px-2 py-1 rounded flex items-center space-x-1.5">
-          <div className="w-1.5 h-1.5 bg-emerald-500 rounded-full animate-pulse" />
-          <span className="text-[10px] font-bold text-gray-300 uppercase tracking-wider">480p Playback</span>
+          <div className={`w-1.5 h-1.5 ${useWebGPU ? 'bg-emerald-500' : 'bg-amber-500'} rounded-full animate-pulse`} />
+          <span className="text-[10px] font-bold text-gray-300 uppercase tracking-wider">
+            {useWebGPU ? 'WebGPU' : 'Canvas2D'} {PLAYBACK_HEIGHT}p
+          </span>
         </div>
       </div>
 
-      {/* Hidden Media Pool (Windowed) */}
-      <div className="hidden">
+      <div className="invisible absolute pointer-events-none overflow-hidden w-0 h-0">
         {pooledClips.map((clip) => {
           if (clip.type === TrackType.VIDEO || clip.type === TrackType.AUDIO || clip.type === TrackType.SCREEN) {
             return (
@@ -385,6 +417,8 @@ export const VideoPreview: React.FC<VideoPreviewProps> = ({ clips, tracks, curre
                 onLoadedMetadata={handleVideoReady}
                 onCanPlay={handleVideoReady}
                 onCanPlayThrough={handleVideoReady}
+                onPlaying={handleVideoReady}
+                onWaiting={handleVideoReady}
               />
             );
           }
@@ -403,7 +437,6 @@ export const VideoPreview: React.FC<VideoPreviewProps> = ({ clips, tracks, curre
         })}
       </div>
 
-      {/* Empty State */}
       {activeClips.length === 0 && (
         <div className="absolute inset-0 flex items-center justify-center bg-black z-[100]">
           <p className="text-gray-600 text-sm font-medium">No active clips</p>
