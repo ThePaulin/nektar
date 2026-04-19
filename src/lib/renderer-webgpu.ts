@@ -112,13 +112,13 @@ export class WebGPURenderer {
 
       this.device = await adapter.requestDevice();
       if (!this.device) {
-        console.error("Failed to get WebGPU device");
+        console.warn("Failed to get WebGPU device, falling back to Canvas2D");
         return false;
       }
       this.context = canvas.getContext('webgpu') as unknown as GPUCanvasContext;
       
       if (!this.context) {
-        console.error("Failed to get WebGPU context from canvas");
+        console.warn("Failed to get WebGPU context from canvas, falling back to Canvas2D");
         return false;
       }
 

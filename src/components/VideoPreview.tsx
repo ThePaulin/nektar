@@ -30,6 +30,7 @@ export const VideoPreview: React.FC<VideoPreviewProps> = ({
   const webglLutRef = useRef<WebGLLUT | null>(null);
   const webgpuRendererRef = useRef<WebGPURenderer | null>(null);
   const [useWebGPU, setUseWebGPU] = useState(false);
+  const [isRendererInitialized, setIsRendererInitialized] = useState(false);
   const [lutTextures, setLutTextures] = useState<{ [key: string]: any }>({});
   const [offscreenCanvas, setOffscreenCanvas] = useState<HTMLCanvasElement | null>(null);
   const lutProcessingCanvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -47,9 +48,9 @@ export const VideoPreview: React.FC<VideoPreviewProps> = ({
   // Initialize renderers
   useEffect(() => {
     const initRenderers = async () => {
-      console.log("Initializing renderers, canvasRef:", !!canvasRef.current);
+      console.log("Initializing Canvas2D + WebGL LUTs renderer for preview stability");
       
-      // Always initialize offscreen canvas for fallback
+      // Always initialize offscreen canvas for fallback/rendering
       const offscreen = document.createElement('canvas');
       offscreen.width = PLAYBACK_WIDTH;
       offscreen.height = PLAYBACK_HEIGHT;
@@ -57,25 +58,20 @@ export const VideoPreview: React.FC<VideoPreviewProps> = ({
 
       if (canvasRef.current) {
         try {
-          const renderer = new WebGPURenderer();
-          const success = await renderer.init(canvasRef.current);
-          console.log("WebGPU initialization success:", success);
-          if (success) {
-            webgpuRendererRef.current = renderer;
-            setUseWebGPU(true);
-            console.log("WebGPU Preview Renderer initialized");
-          } else {
-            // Fallback to WebGL for LUTs
-            const lutCanvas = document.createElement('canvas');
-            lutCanvas.width = PLAYBACK_WIDTH;
-            lutCanvas.height = PLAYBACK_HEIGHT;
-            lutProcessingCanvasRef.current = lutCanvas;
-            webglLutRef.current = new WebGLLUT(lutCanvas);
-            console.log("WebGL LUT Fallback initialized");
-          }
+          // Initialize WebGL for LUTs on a separate canvas
+          const lutCanvas = document.createElement('canvas');
+          lutCanvas.width = PLAYBACK_WIDTH;
+          lutCanvas.height = PLAYBACK_HEIGHT;
+          lutProcessingCanvasRef.current = lutCanvas;
+          webglLutRef.current = new WebGLLUT(lutCanvas);
+          console.log("WebGL LUT processing initialized");
         } catch (e) {
-          console.error("Renderer initialization error:", e);
+          console.warn("Renderer initialization error:", e);
+        } finally {
+          setIsRendererInitialized(true);
         }
+      } else {
+        setIsRendererInitialized(true);
       }
     };
     initRenderers();
@@ -131,22 +127,7 @@ export const VideoPreview: React.FC<VideoPreviewProps> = ({
 
   // Main rendering loop
   const render = useCallback((force = false) => {
-    if (useWebGPU && webgpuRendererRef.current) {
-      try {
-        webgpuRendererRef.current.render(
-          activeClips,
-          tracks,
-          videoRefs.current,
-          imageRefs.current,
-          lutTextures,
-          showLutPreview
-        );
-      } catch (e) {
-        console.error("WebGPU render error:", e);
-        setUseWebGPU(false); // Fallback to Canvas2D
-      }
-      return;
-    }
+    if (!isRendererInitialized) return;
 
     const canvas = canvasRef.current;
     if (!canvas || !offscreenCanvas) {
@@ -298,7 +279,7 @@ export const VideoPreview: React.FC<VideoPreviewProps> = ({
     if (isPlaying || allVideosReady || force || activeClips.length > 0) {
       ctx.drawImage(offscreenCanvas, 0, 0);
     }
-  }, [activeClips, tracks, isPlaying, offscreenCanvas, lutDataMap, showLutPreview, useWebGPU, lutTextures]);
+  }, [activeClips, tracks, isPlaying, offscreenCanvas, lutDataMap, showLutPreview, useWebGPU, lutTextures, isRendererInitialized]);
 
   // Force a render when any video element is ready
   const handleVideoReady = useCallback(() => {
@@ -308,6 +289,12 @@ export const VideoPreview: React.FC<VideoPreviewProps> = ({
   }, [isPlaying, render]);
 
   // Sync video elements time and playback state
+  useEffect(() => {
+    if (isRendererInitialized && !isPlaying) {
+      render(true);
+    }
+  }, [isRendererInitialized, isPlaying, render]);
+
   useEffect(() => {
     clips.forEach((clip) => {
       if (clip.type !== TrackType.VIDEO && clip.type !== TrackType.AUDIO && clip.type !== TrackType.SCREEN) return;
@@ -411,6 +398,8 @@ export const VideoPreview: React.FC<VideoPreviewProps> = ({
                 ref={(el) => (videoRefs.current[clip.id] = el)}
                 src={clip.videoUrl}
                 playsInline
+                muted
+                preload="auto"
                 crossOrigin="anonymous"
                 onSeeked={handleVideoReady}
                 onLoadedData={handleVideoReady}
