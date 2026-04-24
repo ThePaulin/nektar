@@ -1,7 +1,7 @@
 
 /// <reference types="@webgpu/types" />
 
-import { Track, TrackType, VideoClip, LUTData } from '../types';
+import { Track, TrackType, VideoClip } from '../types';
 import { COMPOSITE_SHADER } from './export-shared';
 
 export class WebGPURenderer {
@@ -11,11 +11,15 @@ export class WebGPURenderer {
   private lutSampler: GPUSampler | null = null;
   private dummyTexture: GPUTexture | null = null;
   private dummyLutTexture: GPUTexture | null = null;
+  private dummyTextureView: GPUTextureView | null = null;
+  private dummyLutTextureView: GPUTextureView | null = null;
   private externalTrueBuffer: GPUBuffer | null = null;
   private externalFalseBuffer: GPUBuffer | null = null;
+  private uniformBuffer: GPUBuffer | null = null;
   private context: GPUCanvasContext | null = null;
-  private width: number = 1280;
-  private height: number = 720;
+  private width: number = 1920;
+  private height: number = 1080;
+  private imageTextureCache = new Map<number, GPUTexture>();
 
   constructor() {}
 
@@ -73,12 +77,19 @@ export class WebGPURenderer {
         format: 'rgba8unorm', 
         usage: GPUTextureUsage.TEXTURE_BINDING 
       });
+      this.dummyTextureView = this.dummyTexture.createView();
 
       this.dummyLutTexture = this.device.createTexture({
         size: [2, 2, 2],
         format: 'rgba8unorm',
         dimension: '3d',
         usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST
+      });
+      this.dummyLutTextureView = this.dummyLutTexture.createView();
+
+      this.uniformBuffer = this.device.createBuffer({
+        size: 96,
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
       });
 
       this.externalTrueBuffer = this.device.createBuffer({ size: 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST, mappedAtCreation: true });
@@ -144,6 +155,7 @@ export class WebGPURenderer {
     });
 
     renderPass.setPipeline(this.pipeline);
+    const uniformData = new Float32Array(24);
 
     for (const clip of activeClips) {
       const track = trackById?.get(clip.trackId) ?? tracks.find(t => t.id === clip.trackId);
@@ -171,7 +183,7 @@ export class WebGPURenderer {
       const tx = (transform.position.x || 0) / (this.width / 2); 
       const ty = -(transform.position.y || 0) / (this.height / 2); 
 
-      const uniformData = new Float32Array(24); 
+      uniformData.fill(0);
       uniformData[0] = sx * cos; uniformData[1] = sx * sin; uniformData[2] = 0; uniformData[3] = 0;
       uniformData[4] = -sy * sin; uniformData[5] = sy * cos; uniformData[6] = 0; uniformData[7] = 0;
       uniformData[8] = tx; uniformData[9] = ty; uniformData[10] = 1; uniformData[11] = 0;
@@ -208,13 +220,7 @@ export class WebGPURenderer {
       const crop = transform.crop || { top: 0, right: 0, bottom: 0, left: 0 };
       uniformData.set([crop.top, crop.right, crop.bottom, crop.left], 20);
 
-      const uniformBuffer = this.device.createBuffer({
-        size: uniformData.byteLength,
-        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-        mappedAtCreation: true
-      });
-      new Float32Array(uniformBuffer.getMappedRange()).set(uniformData);
-      uniformBuffer.unmap();
+      this.device.queue.writeBuffer(this.uniformBuffer!, 0, uniformData);
 
       if (clip.type === TrackType.VIDEO || clip.type === TrackType.SCREEN) {
         const video = videoRefs[clip.id];
@@ -228,16 +234,17 @@ export class WebGPURenderer {
             const lutTexture = (hasLut && lutTextures[effectiveTrack.id]) 
               ? lutTextures[effectiveTrack.id] 
               : this.dummyLutTexture!;
+            const lutTextureView = lutTexture === this.dummyLutTexture ? this.dummyLutTextureView! : lutTexture.createView();
             
             const bindGroup = this.device.createBindGroup({
               layout: this.pipeline.getBindGroupLayout(0),
               entries: [
-                { binding: 0, resource: { buffer: uniformBuffer } },
+                { binding: 0, resource: { buffer: this.uniformBuffer! } },
                 { binding: 1, resource: this.sampler! },
                 { binding: 2, resource: videoTexture },
-                { binding: 3, resource: this.dummyTexture!.createView() },
+                { binding: 3, resource: this.dummyTextureView! },
                 { binding: 4, resource: { buffer: this.externalTrueBuffer! } },
-                { binding: 5, resource: lutTexture.createView() },
+                { binding: 5, resource: lutTextureView },
                 { binding: 6, resource: this.lutSampler! }
               ]
             });
@@ -255,30 +262,35 @@ export class WebGPURenderer {
         const sourceHeight = isImageBitmap ? img.height : (img as HTMLImageElement | null)?.naturalHeight ?? 0;
         if (img && (isImageBitmap || ((img as HTMLImageElement).complete && sourceWidth > 0))) {
           try {
-            const imageTexture = this.device.createTexture({
-              size: [sourceWidth, sourceHeight],
-              format: 'rgba8unorm',
-              usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT
-            });
-            this.device.queue.copyExternalImageToTexture(
-              { source: img },
-              { texture: imageTexture },
-              [sourceWidth, sourceHeight]
-            );
+            let imageTexture = this.imageTextureCache.get(clip.id);
+            if (!imageTexture) {
+              imageTexture = this.device.createTexture({
+                size: [sourceWidth, sourceHeight],
+                format: 'rgba8unorm',
+                usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT
+              });
+              this.device.queue.copyExternalImageToTexture(
+                { source: img },
+                { texture: imageTexture },
+                [sourceWidth, sourceHeight]
+              );
+              this.imageTextureCache.set(clip.id, imageTexture);
+            }
 
             const lutTexture = (hasLut && lutTextures[effectiveTrack.id]) 
               ? lutTextures[effectiveTrack.id] 
               : this.dummyLutTexture!;
+            const lutTextureView = lutTexture === this.dummyLutTexture ? this.dummyLutTextureView! : lutTexture.createView();
 
             const bindGroup = this.device.createBindGroup({
               layout: this.pipeline.getBindGroupLayout(0),
               entries: [
-                { binding: 0, resource: { buffer: uniformBuffer } },
+                { binding: 0, resource: { buffer: this.uniformBuffer! } },
                 { binding: 1, resource: this.sampler! },
-                { binding: 2, resource: this.dummyTexture!.createView() }, // placeholder for external
+                { binding: 2, resource: this.dummyTextureView! }, // placeholder for external
                 { binding: 3, resource: imageTexture.createView() },
                 { binding: 4, resource: { buffer: this.externalFalseBuffer! } },
-                { binding: 5, resource: lutTexture.createView() },
+                { binding: 5, resource: lutTextureView },
                 { binding: 6, resource: this.lutSampler! }
               ]
             });

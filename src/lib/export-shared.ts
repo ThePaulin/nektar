@@ -1,7 +1,7 @@
 import { Track, VideoClip } from '../types';
 
-export const EXPORT_WIDTH = 1280;
-export const EXPORT_HEIGHT = 720;
+export const EXPORT_WIDTH = 1920;
+export const EXPORT_HEIGHT = 1080;
 export const EXPORT_FPS = 30;
 export const EXPORT_SAMPLE_RATE = 44100;
 
@@ -100,15 +100,31 @@ export interface ExportFramePlan {
   activeClips: VideoClip[];
 }
 
+export interface ExportClipEvent {
+  time: number;
+  clip: VideoClip;
+  kind: 'start' | 'end';
+}
+
 export interface ExportTimelinePlan {
   visibleTracks: Track[];
   trackById: Map<string, Track>;
   trackOrderById: Map<string, number>;
   exportClips: VideoClip[];
-  framePlans: ExportFramePlan[];
+  clipEvents: ExportClipEvent[];
   totalFrames: number;
   exportDuration: number;
   fps: number;
+}
+
+function compareClips(left: VideoClip, right: VideoClip, trackOrderById: Map<string, number>) {
+  const leftOrder = trackOrderById.get(left.trackId) ?? 0;
+  const rightOrder = trackOrderById.get(right.trackId) ?? 0;
+  if (leftOrder !== rightOrder) return rightOrder - leftOrder;
+  if (left.timelinePosition.start !== right.timelinePosition.start) {
+    return left.timelinePosition.start - right.timelinePosition.start;
+  }
+  return left.id - right.id;
 }
 
 export function buildExportPlan(
@@ -130,41 +146,31 @@ export function buildExportPlan(
     .filter((clip) => visibleTrackIds.has(clip.trackId))
     .filter((clip) => clip.timelinePosition.end > exportRange.start && clip.timelinePosition.start < exportRange.end)
     .slice()
-    .sort((left, right) => {
-      const leftOrder = trackOrderById.get(left.trackId) ?? 0;
-      const rightOrder = trackOrderById.get(right.trackId) ?? 0;
-      if (leftOrder !== rightOrder) return rightOrder - leftOrder;
-      return left.timelinePosition.start - right.timelinePosition.start;
-    });
+    .sort((left, right) => compareClips(left, right, trackOrderById));
 
   const exportDuration = Math.max(0, Math.round((exportRange.end - exportRange.start) * fps) / fps);
   const totalFrames = Math.max(0, Math.round(exportDuration * fps));
-  const framePlans: ExportFramePlan[] = [];
 
-  for (let index = 0; index < totalFrames; index += 1) {
-    const time = exportRange.start + index / fps;
-    const activeClips = exportClips
-      .filter((clip) => time >= clip.timelinePosition.start && time < clip.timelinePosition.end)
-      .slice()
-      .sort((left, right) => {
-        const leftOrder = trackOrderById.get(left.trackId) ?? 0;
-        const rightOrder = trackOrderById.get(right.trackId) ?? 0;
-        if (leftOrder !== rightOrder) return rightOrder - leftOrder;
-        return left.timelinePosition.start - right.timelinePosition.start;
-      });
-
-    framePlans.push({ time, activeClips });
+  const clipEvents: ExportClipEvent[] = [];
+  for (const clip of exportClips) {
+    clipEvents.push({ time: clip.timelinePosition.start, clip, kind: 'start' });
+    clipEvents.push({ time: clip.timelinePosition.end, clip, kind: 'end' });
   }
+
+  clipEvents.sort((left, right) => {
+    if (left.time !== right.time) return left.time - right.time;
+    if (left.kind !== right.kind) return left.kind === 'start' ? -1 : 1;
+    return compareClips(left.clip, right.clip, trackOrderById);
+  });
 
   return {
     visibleTracks,
     trackById,
     trackOrderById,
     exportClips,
-    framePlans,
+    clipEvents,
     totalFrames,
     exportDuration,
     fps,
   };
 }
-
