@@ -156,7 +156,7 @@ export const ExportDialog: React.FC<ExportDialogProps> = ({ clips, tracks, expor
   const imageElementsRef = useRef<Record<number, HTMLImageElement>>({});
 
   const cleanupLegacyAssets = () => {
-    Object.values(videoElementsRef.current).forEach((video) => {
+    Object.values(videoElementsRef.current as Record<string, HTMLVideoElement>).forEach((video) => {
       try {
         video.pause();
         video.removeAttribute('src');
@@ -461,7 +461,11 @@ export const ExportDialog: React.FC<ExportDialogProps> = ({ clips, tracks, expor
 
         const activeClips = exportClips
           .filter((clip) => time >= clip.timelinePosition.start && time < clip.timelinePosition.end)
-          .sort((left, right) => (trackIndexById.get(right.trackId) ?? 0) - (trackIndexById.get(left.trackId) ?? 0));
+          .sort((left, right) => {
+            const rightTrackIndex = Number(trackIndexById.get(right.trackId) ?? 0);
+            const leftTrackIndex = Number(trackIndexById.get(left.trackId) ?? 0);
+            return rightTrackIndex - leftTrackIndex;
+          });
 
         await Promise.all(
           activeClips

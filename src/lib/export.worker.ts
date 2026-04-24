@@ -134,12 +134,12 @@ function buildAudioDecoderConfigs(track: LoadedAudioTrack): AudioDecoderConfig[]
   const configs: AudioDecoderConfig[] = [];
 
   if (track.description) {
-    configs.push({ ...base, ...withLayout, description: track.description });
-    configs.push({ ...base, description: track.description });
+    configs.push({ ...base, ...withLayout, description: track.description } as AudioDecoderConfig);
+    configs.push({ ...base, description: track.description } as AudioDecoderConfig);
   }
 
-  configs.push({ ...base, ...withLayout });
-  configs.push(base);
+  configs.push({ ...base, ...withLayout } as AudioDecoderConfig);
+  configs.push(base as AudioDecoderConfig);
 
   return configs;
 }
