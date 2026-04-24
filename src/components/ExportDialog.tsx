@@ -276,6 +276,85 @@ export const ExportDialog: React.FC<ExportDialogProps> = ({ clips, tracks, total
       console.log("[Export] Audio pre-rendering complete.");
       setProgress(10);
 
+      const canUseWorkerExport =
+        typeof Worker !== 'undefined' &&
+        typeof OffscreenCanvas !== 'undefined' &&
+        'VideoEncoder' in window &&
+        'AudioEncoder' in window &&
+        'VideoDecoder' in window &&
+        'VideoFrame' in window &&
+        'gpu' in navigator;
+
+      if (canUseWorkerExport) {
+        let exportWorker: Worker | null = null;
+        try {
+          const audioLeft = renderedAudioBuffer.getChannelData(0).slice();
+          const audioRight = renderedAudioBuffer.getChannelData(1).slice();
+          exportWorker = new Worker(new URL('../lib/export.worker.ts', import.meta.url), { type: 'module' });
+
+          const workerResult = await new Promise<{ buffer: ArrayBuffer; mimeType: string }>((resolve, reject) => {
+            exportWorker!.onmessage = (event: MessageEvent<any>) => {
+              const data = event.data;
+              if (!data || typeof data !== 'object') return;
+
+              if (data.type === 'progress' && typeof data.progress === 'number') {
+                setProgress(data.progress);
+                return;
+              }
+
+              if (data.type === 'done' && data.buffer && data.mimeType) {
+                resolve({ buffer: data.buffer, mimeType: data.mimeType });
+                return;
+              }
+
+              if (data.type === 'error') {
+                reject(new Error(data.message || 'Worker export failed'));
+              }
+            };
+
+            exportWorker!.onerror = (event) => {
+              reject(event.error || new Error(event.message));
+            };
+
+            exportWorker!.postMessage(
+              {
+                type: 'start-export',
+                clips: exportClips,
+                tracks,
+                exportRange,
+                format,
+                audio: {
+                  sampleRate,
+                  left: audioLeft.buffer,
+                  right: audioRight.buffer,
+                },
+              },
+              [audioLeft.buffer, audioRight.buffer]
+            );
+          });
+
+          const blob = new Blob([workerResult.buffer], { type: workerResult.mimeType });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = `sequence-export-${Date.now()}.${format}`;
+          a.click();
+
+          URL.revokeObjectURL(url);
+          exportWorker.terminate();
+          exportWorker = null;
+          setStatus('completed');
+          videoElementsRef.current = {};
+          imageElementsRef.current = {};
+          audioCtx.close();
+          return;
+        } catch (workerError) {
+          console.warn('[Export] Worker export failed, falling back to legacy exporter:', workerError);
+        } finally {
+          exportWorker?.terminate();
+        }
+      }
+
       // 3. Setup Export Method (Industry Standard: WebCodecs + Muxer + WebGPU)
       const isWebCodecsSupported = 'VideoEncoder' in window && 'AudioEncoder' in window && 'VideoFrame' in window;
       const isWebGPUSupported = 'gpu' in navigator;

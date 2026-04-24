@@ -2,91 +2,7 @@
 /// <reference types="@webgpu/types" />
 
 import { Track, TrackType, VideoClip, LUTData } from '../types';
-
-const COMPOSITE_SHADER = `
-  struct VertexOutput {
-    @builtin(position) position: vec4<f32>,
-    @location(0) texCoord: vec2<f32>,
-  };
-
-  struct Uniforms {
-    transform: mat3x3<f32>,
-    opacity: f32,
-    lut_intensity: f32,
-    has_lut: u32,
-    is_overlay: u32,
-    overlay_rect: vec4<f32>, // x, y, w, h
-    crop: vec4<f32>, // top, right, bottom, left
-  };
-
-  @group(0) @binding(0) var<uniform> u: Uniforms;
-
-  @vertex
-  fn vs_main(@builtin(vertex_index) vertexIndex: u32) -> VertexOutput {
-    var pos = array<vec2<f32>, 4>(
-      vec2<f32>(-1.0,  1.0),
-      vec2<f32>( 1.0,  1.0),
-      vec2<f32>(-1.0, -1.0),
-      vec2<f32>( 1.0, -1.0)
-    );
-    var tex = array<vec2<f32>, 4>(
-      vec2<f32>(0.0, 0.0),
-      vec2<f32>(1.0, 0.0),
-      vec2<f32>(0.0, 1.0),
-      vec2<f32>(1.0, 1.0)
-    );
-
-    var out: VertexOutput;
-    let p = u.transform * vec3<f32>(pos[vertexIndex], 1.0);
-    out.position = vec4<f32>(p.xy, 0.0, 1.0);
-    
-    let tc = tex[vertexIndex];
-    let croppedTC = vec2<f32>(
-      u.crop.w / 100.0 + tc.x * (1.0 - (u.crop.w + u.crop.y) / 100.0),
-      u.crop.x / 100.0 + tc.y * (1.0 - (u.crop.x + u.crop.z) / 100.0)
-    );
-    out.texCoord = croppedTC;
-    return out;
-  }
-
-  @group(0) @binding(1) var s: sampler;
-  @group(0) @binding(2) var t_ext: texture_external;
-  @group(0) @binding(3) var t_2d: texture_2d<f32>;
-  @group(0) @binding(4) var<uniform> is_external: u32;
-  @group(0) @binding(5) var t_lut: texture_3d<f32>;
-  @group(0) @binding(6) var s_lut: sampler;
-
-  @fragment
-  fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    var color: vec4<f32>;
-    if (is_external == 1u) {
-      color = textureSampleBaseClampToEdge(t_ext, s, in.texCoord);
-    } else {
-      color = textureSample(t_2d, s, in.texCoord);
-    }
-
-    if (u.has_lut == 1u) {
-      var apply_lut = false;
-      if (u.is_overlay == 1u) {
-        if (in.position.x >= u.overlay_rect.x && in.position.x <= u.overlay_rect.x + u.overlay_rect.z &&
-            in.position.y >= u.overlay_rect.y && in.position.y <= u.overlay_rect.y + u.overlay_rect.w) {
-          apply_lut = true;
-        }
-      } else {
-        apply_lut = true;
-      }
-      
-      if (apply_lut) {
-        let lut_size = f32(textureDimensions(t_lut).x);
-        let coords = color.rgb * ((lut_size - 1.0) / lut_size) + (0.5 / lut_size);
-        let lut_color = textureSample(t_lut, s_lut, coords).rgb;
-        color = vec4<f32>(mix(color.rgb, lut_color, u.lut_intensity), color.a);
-      }
-    }
-
-    return vec4<f32>(color.rgb, color.a * u.opacity);
-  }
-`;
+import { COMPOSITE_SHADER } from './export-shared';
 
 export class WebGPURenderer {
   private device: GPUDevice | null = null;
@@ -209,10 +125,11 @@ export class WebGPURenderer {
   render(
     activeClips: VideoClip[],
     tracks: Track[],
-    videoRefs: { [key: number]: HTMLVideoElement | null },
-    imageRefs: { [key: number]: HTMLImageElement | null },
+    videoRefs: { [key: number]: HTMLVideoElement | VideoFrame | null },
+    imageRefs: { [key: number]: HTMLImageElement | ImageBitmap | null },
     lutTextures: { [key: string]: GPUTexture },
-    showLutPreview: boolean
+    showLutPreview: boolean,
+    trackById?: Map<string, Track>
   ) {
     if (!this.device || !this.pipeline || !this.context) return;
 
@@ -229,10 +146,10 @@ export class WebGPURenderer {
     renderPass.setPipeline(this.pipeline);
 
     for (const clip of activeClips) {
-      const track = tracks.find(t => t.id === clip.trackId);
+      const track = trackById?.get(clip.trackId) ?? tracks.find(t => t.id === clip.trackId);
       if (!track || !track.isVisible) continue;
 
-      const parentTrack = track.parentId ? tracks.find(t => t.id === track.parentId) : null;
+      const parentTrack = track.parentId ? (trackById?.get(track.parentId) ?? tracks.find(t => t.id === track.parentId)) : null;
       const effectiveTrack = parentTrack || track;
       
       const transform = { 
@@ -301,8 +218,11 @@ export class WebGPURenderer {
 
       if (clip.type === TrackType.VIDEO || clip.type === TrackType.SCREEN) {
         const video = videoRefs[clip.id];
-        // WebGPU importExternalTexture usually requires HAVE_CURRENT_DATA (2) or better
-        if (video && video.readyState >= 2 && video.videoWidth > 0) {
+        const isVideoFrame = typeof VideoFrame !== 'undefined' && video instanceof VideoFrame;
+        const sourceWidth = isVideoFrame ? video.displayWidth : (video as HTMLVideoElement | null)?.videoWidth ?? 0;
+        const sourceHeight = isVideoFrame ? video.displayHeight : (video as HTMLVideoElement | null)?.videoHeight ?? 0;
+
+        if (video && (isVideoFrame || ((video as HTMLVideoElement).readyState >= 2 && sourceWidth > 0))) {
           try {
             const videoTexture = this.device.importExternalTexture({ source: video });
             const lutTexture = (hasLut && lutTextures[effectiveTrack.id]) 
@@ -327,25 +247,23 @@ export class WebGPURenderer {
           } catch (e) {
             console.warn("GPU Video Import failed for clip", clip.id, e);
           }
-        } else {
-          const video = videoRefs[clip.id];
-          if (video) {
-            // console.log("Video not ready for clip", clip.id, "readyState:", video.readyState, "videoWidth:", video.videoWidth);
-          }
         }
       } else if (clip.type === TrackType.IMAGE) {
         const img = imageRefs[clip.id];
-        if (img && img.complete && img.naturalWidth > 0) {
+        const isImageBitmap = typeof ImageBitmap !== 'undefined' && img instanceof ImageBitmap;
+        const sourceWidth = isImageBitmap ? img.width : (img as HTMLImageElement | null)?.naturalWidth ?? 0;
+        const sourceHeight = isImageBitmap ? img.height : (img as HTMLImageElement | null)?.naturalHeight ?? 0;
+        if (img && (isImageBitmap || ((img as HTMLImageElement).complete && sourceWidth > 0))) {
           try {
             const imageTexture = this.device.createTexture({
-              size: [img.naturalWidth, img.naturalHeight],
+              size: [sourceWidth, sourceHeight],
               format: 'rgba8unorm',
               usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT
             });
             this.device.queue.copyExternalImageToTexture(
               { source: img },
               { texture: imageTexture },
-              [img.naturalWidth, img.naturalHeight]
+              [sourceWidth, sourceHeight]
             );
 
             const lutTexture = (hasLut && lutTextures[effectiveTrack.id]) 
