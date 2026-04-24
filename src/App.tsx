@@ -8,6 +8,17 @@ import { AudioRecorder } from './components/AudioRecorder';
 import { ClipPropertiesPanel } from './components/ClipPropertiesPanel';
 import { TrackActionArea } from './components/TrackActionArea';
 import { VideoObjType, VideoClip, RecordingMode, Track, TrackType, RecordingSource } from './types';
+import {
+  createTrackBundle,
+  deleteClipsState,
+  deleteTrackBundle,
+  getRecordingStartTime,
+  moveTrack,
+  resolveClipOverlaps,
+  rippleDeleteClipsState,
+  splitClipState,
+  trimClipState,
+} from './lib/editor-operations';
 import { videoDB } from './services/db';
 import {
   Play, Pause, SkipBack, SkipForward, Video, Download, Undo2, Redo2, Radio,
@@ -346,7 +357,7 @@ export default function App() {
       }
 
       await videoDB.saveClip(newClip, file);
-      const finalClips = resolveOverlaps(newClip, [...updatedClips, newClip]);
+      const finalClips = resolveClipOverlaps(newClip, [...updatedClips, newClip]);
       pushToHistory(finalClips);
       setSelectedClipIds([newId]);
       setStorageError(null);
@@ -437,68 +448,8 @@ export default function App() {
     setTempState(null);
   };
 
-  const resolveOverlaps = (updatedClip: VideoClip, allClips: VideoObjType, ignoreIds: number[] = []): VideoObjType => {
-    const uStart = updatedClip.timelinePosition.start;
-    const uEnd = updatedClip.timelinePosition.end;
-
-    return allClips.map(clip => {
-      if (clip.id === updatedClip.id) return updatedClip;
-      if (ignoreIds.includes(clip.id)) return clip;
-      if (clip.trackId !== updatedClip.trackId) return clip;
-
-      const cStart = clip.timelinePosition.start;
-      const cEnd = clip.timelinePosition.end;
-
-      // No overlap
-      if (uStart >= cEnd || uEnd <= cStart) return clip;
-
-      // Full overlap
-      if (uStart <= cStart && uEnd >= cEnd) {
-        return { ...clip, timelinePosition: { start: cStart, end: cStart } }; // Will be filtered
-      }
-
-      // Overlap from left (Updated clip covers the start of existing clip)
-      if (uStart <= cStart && uEnd < cEnd) {
-        const overlap = uEnd - cStart;
-        return {
-          ...clip,
-          sourceStart: clip.sourceStart + overlap,
-          timelinePosition: { start: uEnd, end: cEnd }
-        };
-      }
-
-      // Overlap from right (Updated clip covers the end of existing clip)
-      if (uStart > cStart && uEnd >= cEnd) {
-        return {
-          ...clip,
-          timelinePosition: { start: cStart, end: uStart }
-        };
-      }
-
-      // Middle overlap (Updated clip is inside existing clip)
-      // Contract the side that is "closer" or just the right side to avoid splitting during drag
-      if (uStart > cStart && uEnd < cEnd) {
-        return {
-          ...clip,
-          timelinePosition: { start: cStart, end: uStart }
-        };
-      }
-
-      return clip;
-    }).filter(c => c.timelinePosition.end > c.timelinePosition.start);
-  };
-
   const getModeStartTime = useCallback(() => {
-    if (recordingMode === 'insert') {
-      return currentTime;
-    } else {
-      // For append mode, we find the end of the last clip on the selected track
-      const trackClips = clips.filter(c => c.trackId === selectedTrackId);
-      if (trackClips.length > 0) {
-        return Math.max(...trackClips.map(c => c.timelinePosition.end));
-      }
-      return 0;
-    }
+    return getRecordingStartTime(recordingMode, currentTime, clips, selectedTrackId);
   }, [recordingMode, currentTime, clips, selectedTrackId]);
 
   const handleStartRecording = () => {
@@ -724,7 +675,7 @@ export default function App() {
     // Apply resolveOverlaps to handle any remaining edge cases (like clips that spanned the insertion point)
     let finalClips = [...updatedClips];
     for (const clip of newClips) {
-      finalClips = resolveOverlaps(clip, [...finalClips, clip]);
+      finalClips = resolveClipOverlaps(clip, [...finalClips, clip]);
     }
     pushToHistory(finalClips);
     setSelectedClipIds(newClips.map(c => c.id));
@@ -787,7 +738,7 @@ export default function App() {
 
       // Resolve overlaps for each updated clip against non-moving clips
       updatedClips.forEach(updatedClip => {
-        nextClips = resolveOverlaps(updatedClip, nextClips, updateIds);
+        nextClips = resolveClipOverlaps(updatedClip, nextClips, updateIds);
       });
 
       return nextClips;
@@ -795,73 +746,16 @@ export default function App() {
   };
 
   const handleAddTrack = (type: TrackType) => {
-    const baseId = `track-${Date.now()}`;
-    const newTracks: Track[] = [{
-      id: baseId,
-      name: `${type.charAt(0).toUpperCase() + type.slice(1)} ${tracks.filter(t => t.type === type && !t.isSubTrack).length + 1}`,
-      type,
-      isVisible: true,
-      isLocked: false,
-      isMuted: false,
-      isArmed: type === TrackType.VIDEO || type === TrackType.AUDIO || type === TrackType.SCREEN || type === TrackType.IMAGE,
-      order: tracks.length,
-    }];
-
-    if (type === TrackType.VIDEO || type === TrackType.SCREEN) {
-      newTracks.push({
-        id: `${baseId}-camera`,
-        name: 'Camera',
-        type: TrackType.VIDEO,
-        isVisible: true,
-        isLocked: false,
-        isMuted: false,
-        isArmed: true,
-        order: tracks.length + 1,
-        parentId: baseId,
-        isSubTrack: true,
-        subTrackType: 'camera'
-      });
-      newTracks.push({
-        id: `${baseId}-screen`,
-        name: 'Screen',
-        type: TrackType.VIDEO,
-        isVisible: true,
-        isLocked: false,
-        isMuted: false,
-        isArmed: true,
-        order: tracks.length + 2,
-        parentId: baseId,
-        isSubTrack: true,
-        subTrackType: 'screen'
-      });
-    }
-
+    const newTracks = createTrackBundle(type, tracks);
     setTracks([...tracks, ...newTracks]);
     setSelectedTrackId(newTracks[0].id);
   };
 
   const handleDeleteTrack = (trackId: string) => {
-    if (tracks.length <= 1) return;
-    
-    // Find all tracks to delete (parent and its sub-tracks)
-    const trackIdsToDelete = [trackId];
-    tracks.forEach(t => {
-      if (t.parentId === trackId) {
-        trackIdsToDelete.push(t.id);
-      }
-    });
-
-    const remainingTracks = tracks.filter(t => !trackIdsToDelete.includes(t.id)).map((t, i) => ({
-      ...t,
-      order: i
-    }));
-    
-    setTracks(remainingTracks);
-    setClips(clips.filter(c => !trackIdsToDelete.includes(c.trackId)));
-    
-    if (trackIdsToDelete.includes(selectedTrackId)) {
-      setSelectedTrackId(remainingTracks[0]?.id || '');
-    }
+    const nextState = deleteTrackBundle(tracks, clips, trackId, selectedTrackId);
+    setTracks(nextState.tracks);
+    setClips(nextState.clips);
+    setSelectedTrackId(nextState.selectedTrackId);
   };
 
   const handleDuplicateTrack = (trackId: string) => {
@@ -1015,7 +909,7 @@ export default function App() {
       console.error("Failed to save text clip to IndexedDB:", err);
     }
 
-    const finalClips = resolveOverlaps(newClip, [...updatedClips, newClip]);
+    const finalClips = resolveClipOverlaps(newClip, [...updatedClips, newClip]);
     pushToHistory(finalClips);
     setSelectedClipIds([newId]);
   };
@@ -1024,84 +918,7 @@ export default function App() {
     const clipToTrim = clips.find(c => c.id === clipId);
     if (clipToTrim && isTrackLocked(clipToTrim.trackId)) return;
 
-    setClips((prev) => {
-      const clip = prev.find(c => c.id === clipId);
-      if (!clip) return prev;
-
-      let updatedClip: VideoClip;
-      const isMedia = clip.type === TrackType.VIDEO || clip.type === TrackType.AUDIO || clip.type === TrackType.SCREEN;
-
-      if (side === 'left') {
-        const maxStart = clip.timelinePosition.end - 0.1; // Min 0.1s duration
-        const clampedStart = Math.max(0, Math.min(newTime, maxStart));
-        const delta = clampedStart - clip.timelinePosition.start;
-
-        if (isMedia) {
-          // Ensure we don't trim before source start
-          if (clip.sourceStart + delta < 0) return prev;
-          // Ensure we don't trim past source end
-          if (clip.sourceStart + delta > clip.duration) return prev;
-        }
-
-        updatedClip = {
-          ...clip,
-          sourceStart: isMedia ? clip.sourceStart + delta : clip.sourceStart,
-          timelinePosition: {
-            ...clip.timelinePosition,
-            start: clampedStart,
-          },
-        };
-      } else {
-        const minEnd = clip.timelinePosition.start + 0.1;
-        const clampedEnd = Math.max(newTime, minEnd);
-        const duration = clampedEnd - clip.timelinePosition.start;
-
-        if (isMedia) {
-          // Ensure we don't trim past source end
-          if (clip.sourceStart + duration > clip.duration) return prev;
-        }
-
-        updatedClip = {
-          ...clip,
-          timelinePosition: {
-            ...clip.timelinePosition,
-            end: clampedEnd,
-          },
-        };
-      }
-
-      let updatedClips = prev.map(c => c.id === clipId ? updatedClip : c);
-
-      // Sync with children if it's a placeholder
-      if (updatedClip.isPlaceholder && updatedClip.childClipIds) {
-        updatedClips = updatedClips.map(c => {
-          if (updatedClip.childClipIds?.includes(c.id)) {
-            if (side === 'left') {
-              const delta = updatedClip.timelinePosition.start - clip.timelinePosition.start;
-              return {
-                ...c,
-                sourceStart: c.sourceStart + delta,
-                timelinePosition: {
-                  ...c.timelinePosition,
-                  start: updatedClip.timelinePosition.start,
-                }
-              };
-            } else {
-              return {
-                ...c,
-                timelinePosition: {
-                  ...c.timelinePosition,
-                  end: updatedClip.timelinePosition.end,
-                }
-              };
-            }
-          }
-          return c;
-        });
-      }
-
-      return resolveOverlaps(updatedClip, updatedClips);
-    });
+    setClips((prev) => trimClipState(prev, clipId, side, newTime));
   };
 
   const handleSplit = () => {
@@ -1114,184 +931,46 @@ export default function App() {
         alert('This track is locked and cannot be modified.');
         return;
       }
-      const splitPoint = currentTime;
-      const firstClipEnd = splitPoint;
-      const secondClipStart = splitPoint;
-      const offsetInClip = splitPoint - clipToSplit.timelinePosition.start;
-
-      const firstClip = {
-        ...clipToSplit,
-        timelinePosition: {
-          ...clipToSplit.timelinePosition,
-          end: firstClipEnd,
-        },
-      };
-
-      const secondClipId = Math.max(...clips.map(c => c.id)) + 1;
-      const secondClip = {
-        ...clipToSplit,
-        id: secondClipId,
-        sourceStart: clipToSplit.sourceStart + offsetInClip,
-        timelinePosition: {
-          start: secondClipStart,
-          end: clipToSplit.timelinePosition.end,
-        },
-      };
-
-      let newState = [
-        ...clips.filter((c) => c.id !== clipToSplit.id),
-        firstClip,
-        secondClip,
-      ];
-
-      // Sync with children if it's a placeholder
-      if (clipToSplit.isPlaceholder && clipToSplit.childClipIds) {
-        const firstChildIds: number[] = [];
-        const secondChildIds: number[] = [];
-        let nextId = Math.max(...newState.map(c => c.id)) + 1;
-
-        clipToSplit.childClipIds.forEach(childId => {
-          const childClip = clips.find(c => c.id === childId);
-          if (childClip) {
-            const firstChild = {
-              ...childClip,
-              timelinePosition: {
-                ...childClip.timelinePosition,
-                end: firstClipEnd,
-              },
-            };
-            const secondChildId = nextId++;
-            const secondChild = {
-              ...childClip,
-              id: secondChildId,
-              sourceStart: childClip.sourceStart + offsetInClip,
-              timelinePosition: {
-                start: secondClipStart,
-                end: childClip.timelinePosition.end,
-              },
-            };
-            
-            firstChildIds.push(childId);
-            secondChildIds.push(secondChildId);
-            
-            newState = [
-              ...newState.filter(c => c.id !== childId),
-              firstChild,
-              secondChild
-            ];
-          }
-        });
-
-        // Update placeholder child lists
-        newState = newState.map(c => {
-          if (c.id === firstClip.id) return { ...c, childClipIds: firstChildIds };
-          if (c.id === secondClip.id) return { ...c, childClipIds: secondChildIds };
-          return c;
-        });
+      const nextState = splitClipState(clips, currentTime);
+      pushToHistory(nextState.clips);
+      if (nextState.selectedClipId !== null) {
+        setSelectedClipIds([nextState.selectedClipId]);
       }
-
-      newState.sort((a, b) => a.timelinePosition.start - b.timelinePosition.start);
-      pushToHistory(newState);
-      setSelectedClipIds([secondClip.id]);
     }
   };
 
   const handleDelete = () => {
-    let clipsToDelete: VideoClip[] = [];
+    const unlockedSelection = selectedClipIds.filter((id) => {
+      const clip = clips.find((entry) => entry.id === id);
+      return clip ? !isTrackLocked(clip.trackId) : false;
+    });
+    const nextState = deleteClipsState(clips, unlockedSelection, currentTime);
+    if (nextState.deletedClips.length === 0) return;
 
-    if (selectedClipIds.length > 0) {
-      clipsToDelete = clips.filter(c => selectedClipIds.includes(c.id));
-    } else {
-      const clipUnderPlayhead = clips.find(
-        (c) => currentTime >= c.timelinePosition.start && currentTime <= c.timelinePosition.end
-      );
-      if (clipUnderPlayhead) clipsToDelete = [clipUnderPlayhead];
-    }
+    nextState.deletedClips.forEach((clip) => {
+      const otherClipsUsingBlob = nextState.clips.some((entry) => entry.blobId === clip.blobId);
+      videoDB.deleteClip(clip.id, !otherClipsUsingBlob ? clip.blobId : undefined);
+    });
 
-    // Filter out clips on locked tracks
-    clipsToDelete = clipsToDelete.filter(c => !isTrackLocked(c.trackId));
-
-    if (clipsToDelete.length > 0) {
-      const deleteIds = new Set(clipsToDelete.map(c => c.id));
-      
-      // Add child clips of placeholders to delete list
-      clipsToDelete.forEach(clip => {
-        if (clip.isPlaceholder && clip.childClipIds) {
-          clip.childClipIds.forEach(id => deleteIds.add(id));
-        }
-      });
-
-      const newState = clips.filter((c) => !deleteIds.has(c.id));
-
-      clipsToDelete.forEach(clip => {
-        const otherClipsUsingBlob = newState.some(c => c.blobId === clip.blobId);
-        videoDB.deleteClip(clip.id, !otherClipsUsingBlob ? clip.blobId : undefined);
-      });
-
-      pushToHistory(newState);
-      setSelectedClipIds([]);
-    }
+    pushToHistory(nextState.clips);
+    setSelectedClipIds([]);
   };
 
   const handleRippleDelete = () => {
-    let clipsToDelete: VideoClip[] = [];
+    const unlockedSelection = selectedClipIds.filter((id) => {
+      const clip = clips.find((entry) => entry.id === id);
+      return clip ? !isTrackLocked(clip.trackId) : false;
+    });
+    const nextState = rippleDeleteClipsState(clips, unlockedSelection, currentTime);
+    if (nextState.deletedClips.length === 0) return;
 
-    if (selectedClipIds.length > 0) {
-      clipsToDelete = clips.filter(c => selectedClipIds.includes(c.id));
-    } else {
-      const clipUnderPlayhead = clips.find(
-        (c) => currentTime >= c.timelinePosition.start && currentTime <= c.timelinePosition.end
-      );
-      if (clipUnderPlayhead) clipsToDelete = [clipUnderPlayhead];
-    }
+    nextState.deletedClips.forEach((clip) => {
+      const otherClipsUsingBlob = nextState.clips.some((entry) => entry.blobId === clip.blobId);
+      videoDB.deleteClip(clip.id, !otherClipsUsingBlob ? clip.blobId : undefined);
+    });
 
-    // Filter out clips on locked tracks
-    clipsToDelete = clipsToDelete.filter(c => !isTrackLocked(c.trackId));
-
-    if (clipsToDelete.length > 0) {
-      let newState = [...clips];
-
-      // Add child clips of placeholders to delete list
-      const allToDelete = [...clipsToDelete];
-      clipsToDelete.forEach(clip => {
-        if (clip.isPlaceholder && clip.childClipIds) {
-          clip.childClipIds.forEach(id => {
-            const child = clips.find(c => c.id === id);
-            if (child && !allToDelete.some(c => c.id === id)) {
-              allToDelete.push(child);
-            }
-          });
-        }
-      });
-
-      // Sort clips to delete by start time descending to shift correctly
-      const sortedToDelete = allToDelete.sort((a, b) => b.timelinePosition.start - a.timelinePosition.start);
-
-      sortedToDelete.forEach(clip => {
-        const duration = clip.timelinePosition.end - clip.timelinePosition.start;
-        const start = clip.timelinePosition.start;
-
-        newState = newState.filter(c => c.id !== clip.id).map(c => {
-          if (c.trackId === clip.trackId && c.timelinePosition.start >= start) {
-            return {
-              ...c,
-              timelinePosition: {
-                start: Math.max(0, c.timelinePosition.start - duration),
-                end: Math.max(0, c.timelinePosition.end - duration)
-              }
-            };
-          }
-          return c;
-        });
-
-        // Cleanup IndexedDB
-        const otherClipsUsingBlob = newState.some(c => c.blobId === clip.blobId);
-        videoDB.deleteClip(clip.id, !otherClipsUsingBlob ? clip.blobId : undefined);
-      });
-
-      pushToHistory(newState);
-      setSelectedClipIds([]);
-    }
+    pushToHistory(nextState.clips);
+    setSelectedClipIds([]);
   };
 
   const handleClipRename = (clipId: number, newLabel: string) => {
@@ -1370,25 +1049,7 @@ export default function App() {
   };
 
   const handleMoveTrack = (id: string, direction: 'up' | 'down') => {
-    const index = tracks.findIndex(t => t.id === id);
-    if (index === -1) return;
-
-    const newTracks = [...tracks];
-    const targetIndex = direction === 'up' ? index - 1 : index + 1;
-
-    if (targetIndex >= 0 && targetIndex < tracks.length) {
-      const temp = newTracks[index];
-      newTracks[index] = newTracks[targetIndex];
-      newTracks[targetIndex] = temp;
-      
-      // Update order property for all tracks based on their new positions
-      const orderedTracks = newTracks.map((track, i) => ({
-        ...track,
-        order: i
-      }));
-      
-      setTracks(orderedTracks);
-    }
+    setTracks(moveTrack(tracks, id, direction));
   };
 
   const handleReorderTracks = (newTracks: Track[]) => {
