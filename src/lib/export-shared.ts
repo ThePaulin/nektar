@@ -1,4 +1,4 @@
-import { Track, VideoClip } from '../types';
+import { Track, TrackType, VideoClip } from '../types';
 
 export const EXPORT_WIDTH = 1920;
 export const EXPORT_HEIGHT = 1080;
@@ -106,12 +106,23 @@ export interface ExportClipEvent {
   kind: 'start' | 'end';
 }
 
+export interface ExportAudioMixRange {
+  targetStart: number;
+  targetEnd: number;
+  sourcePositionStart: number;
+  sourceStep: number;
+  gain: number;
+}
+
 export interface ExportTimelinePlan {
   visibleTracks: Track[];
   trackById: Map<string, Track>;
   trackOrderById: Map<string, number>;
   exportClips: VideoClip[];
   clipEvents: ExportClipEvent[];
+  frameTimes: Float64Array;
+  frameTimestampsUs: Float64Array;
+  textLayoutSignatureByClipId: Map<number, string>;
   totalFrames: number;
   exportDuration: number;
   fps: number;
@@ -125,6 +136,137 @@ function compareClips(left: VideoClip, right: VideoClip, trackOrderById: Map<str
     return left.timelinePosition.start - right.timelinePosition.start;
   }
   return left.id - right.id;
+}
+
+export function buildTextLayoutSignature(clip: VideoClip) {
+  const fontSize = clip.style?.fontSize || 48;
+  const fontFamily = clip.style?.fontFamily || 'sans-serif';
+  const fontWeight = clip.style?.fontWeight || 'normal';
+  const fontStyle = clip.style?.fontStyle || 'normal';
+  const fontStretch = clip.style?.fontStretch ? `${clip.style.fontStretch} ` : '';
+
+  return [
+    fontStyle,
+    fontWeight,
+    `${fontStretch}${fontSize}`,
+    fontFamily,
+    clip.content || '',
+    clip.style?.backgroundColor || '',
+    clip.style?.color || '',
+  ].join('|');
+}
+
+export function buildAudioMixRange(
+  clip: VideoClip,
+  exportRange: ExportRange,
+  exportSampleRate: number,
+  sourceSampleRate: number,
+  gain = 1
+): ExportAudioMixRange | null {
+  const exportDuration = Math.max(0, exportRange.end - exportRange.start);
+  const clipStart = Math.max(0, clip.timelinePosition.start - exportRange.start);
+  const clipEnd = Math.min(exportDuration, clip.timelinePosition.end - exportRange.start);
+  if (clipEnd <= clipStart || exportSampleRate <= 0 || sourceSampleRate <= 0) {
+    return null;
+  }
+
+  const targetStart = Math.max(0, Math.floor(clipStart * exportSampleRate));
+  const targetEnd = Math.min(Math.ceil(exportDuration * exportSampleRate), Math.ceil(clipEnd * exportSampleRate));
+  if (targetEnd <= targetStart) {
+    return null;
+  }
+
+  const sourcePositionStart = Math.max(0, clip.sourceStart * sourceSampleRate + (targetStart / exportSampleRate - clipStart) * sourceSampleRate);
+
+  return {
+    targetStart,
+    targetEnd,
+    sourcePositionStart,
+    sourceStep: sourceSampleRate / exportSampleRate,
+    gain,
+  };
+}
+
+export function createExportCursor(plan: ExportTimelinePlan) {
+  const events = plan.clipEvents.slice();
+  const active = new Map<number, VideoClip>();
+  const ordered: VideoClip[] = [];
+  const videoClips: VideoClip[] = [];
+  const imageClips: VideoClip[] = [];
+  const textClips: VideoClip[] = [];
+  let eventIndex = 0;
+
+  const compareClipsByPlan = (left: VideoClip, right: VideoClip) => {
+    const leftOrder = plan.trackOrderById.get(left.trackId) ?? 0;
+    const rightOrder = plan.trackOrderById.get(right.trackId) ?? 0;
+    if (leftOrder !== rightOrder) return rightOrder - leftOrder;
+    if (left.timelinePosition.start !== right.timelinePosition.start) {
+      return left.timelinePosition.start - right.timelinePosition.start;
+    }
+    return left.id - right.id;
+  };
+
+  const rebuild = () => {
+    ordered.length = 0;
+    videoClips.length = 0;
+    imageClips.length = 0;
+    textClips.length = 0;
+
+    for (const clip of active.values()) {
+      ordered.push(clip);
+    }
+
+    ordered.sort(compareClipsByPlan);
+
+    for (const clip of ordered) {
+      switch (clip.type) {
+        case TrackType.VIDEO:
+        case TrackType.SCREEN:
+          videoClips.push(clip);
+          break;
+        case TrackType.IMAGE:
+          imageClips.push(clip);
+          break;
+        case TrackType.TEXT:
+        case TrackType.SUBTITLE:
+          textClips.push(clip);
+          break;
+      }
+    }
+  };
+
+  return {
+    advanceTo(time: number) {
+      let changed = false;
+
+      while (eventIndex < events.length && events[eventIndex].time <= time + 1e-6) {
+        const event = events[eventIndex];
+        if (event.kind === 'start') {
+          active.set(event.clip.id, event.clip);
+        } else {
+          active.delete(event.clip.id);
+        }
+        changed = true;
+        eventIndex += 1;
+      }
+
+      if (changed) {
+        rebuild();
+      }
+    },
+    getActiveClips() {
+      return ordered;
+    },
+    getActiveVideoClips() {
+      return videoClips;
+    },
+    getActiveImageClips() {
+      return imageClips;
+    },
+    getActiveTextClips() {
+      return textClips;
+    },
+  };
 }
 
 export function buildExportPlan(
@@ -150,11 +292,23 @@ export function buildExportPlan(
 
   const exportDuration = Math.max(0, Math.round((exportRange.end - exportRange.start) * fps) / fps);
   const totalFrames = Math.max(0, Math.round(exportDuration * fps));
+  const frameTimes = new Float64Array(totalFrames);
+  const frameTimestampsUs = new Float64Array(totalFrames);
+  const frameDurationUs = Math.round(1_000_000 / fps);
+  for (let index = 0; index < totalFrames; index += 1) {
+    frameTimes[index] = exportRange.start + index / fps;
+    frameTimestampsUs[index] = index * frameDurationUs;
+  }
 
   const clipEvents: ExportClipEvent[] = [];
+  const textLayoutSignatureByClipId = new Map<number, string>();
   for (const clip of exportClips) {
     clipEvents.push({ time: clip.timelinePosition.start, clip, kind: 'start' });
     clipEvents.push({ time: clip.timelinePosition.end, clip, kind: 'end' });
+
+    if (clip.type === TrackType.TEXT || clip.type === TrackType.SUBTITLE) {
+      textLayoutSignatureByClipId.set(clip.id, buildTextLayoutSignature(clip));
+    }
   }
 
   clipEvents.sort((left, right) => {
@@ -169,6 +323,9 @@ export function buildExportPlan(
     trackOrderById,
     exportClips,
     clipEvents,
+    frameTimes,
+    frameTimestampsUs,
+    textLayoutSignatureByClipId,
     totalFrames,
     exportDuration,
     fps,

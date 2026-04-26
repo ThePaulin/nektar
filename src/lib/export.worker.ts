@@ -4,7 +4,16 @@ import * as MP4Box from 'mp4box';
 import { Muxer as WebMMuxer, ArrayBufferTarget as WebMArrayBufferTarget } from 'webm-muxer';
 import { Muxer as MP4Muxer, ArrayBufferTarget as MP4ArrayBufferTarget } from 'mp4-muxer';
 import { Track, TrackType, VideoClip } from '../types';
-import { buildExportPlan, EXPORT_FPS, EXPORT_HEIGHT, EXPORT_SAMPLE_RATE, EXPORT_WIDTH } from './export-shared';
+import {
+  buildAudioMixRange,
+  buildExportPlan,
+  buildTextLayoutSignature,
+  createExportCursor,
+  EXPORT_FPS,
+  EXPORT_HEIGHT,
+  EXPORT_SAMPLE_RATE,
+  EXPORT_WIDTH,
+} from './export-shared';
 import { WebGPURenderer } from './renderer-webgpu';
 
 type ExportFormat = 'webm' | 'mp4';
@@ -89,8 +98,35 @@ type EncoderCandidate = Omit<EncoderChoice, 'videoConfig' | 'audioConfig'>;
 
 const ctx = self as unknown as DedicatedWorkerGlobalScope;
 
+interface ExportProfiler {
+  start(label: string): () => void;
+  logSummary(): void;
+}
+
 function postProgress(progress: number, message?: string) {
   ctx.postMessage({ type: 'progress', progress, message } satisfies ExportAssetMessage);
+}
+
+function createExportProfiler(): ExportProfiler {
+  const timings = new Map<string, number>();
+  const now = () => (typeof performance !== 'undefined' && typeof performance.now === 'function' ? performance.now() : Date.now());
+
+  return {
+    start(label: string) {
+      const startedAt = now();
+      return () => {
+        timings.set(label, (timings.get(label) ?? 0) + (now() - startedAt));
+      };
+    },
+    logSummary() {
+      if (timings.size === 0) return;
+
+      const summary = [...timings.entries()]
+        .map(([label, elapsed]) => `${label}=${elapsed.toFixed(1)}ms`)
+        .join(', ');
+      console.debug(`[ExportWorker] Export timings: ${summary}`);
+    },
+  };
 }
 
 function serializeDescription(description: any): ArrayBuffer | undefined {
@@ -123,6 +159,14 @@ function throwIfCodecError(error: Error | null | undefined) {
   if (error) {
     throw error;
   }
+}
+
+function isRemoteHttpUrl(url: string) {
+  return url.startsWith('http://') || url.startsWith('https://');
+}
+
+function shouldStreamMedia(url: string, response: Response) {
+  return isRemoteHttpUrl(url) && !!response.body && typeof response.body.getReader === 'function';
 }
 
 function buildAudioDecoderConfigs(track: LoadedAudioTrack): AudioDecoderConfig[] {
@@ -206,76 +250,14 @@ async function configureVideoDecoder(decoder: VideoDecoder, asset: DecodedVideoA
   throw configureError ?? new Error(`Failed to configure video decoder for ${asset.codec}.`);
 }
 
-async function chooseEncoderChoice(requestedFormat: ExportFormat): Promise<EncoderChoice> {
-  const candidate: EncoderCandidate = requestedFormat === 'mp4'
-    ? { format: 'mp4', videoCodec: 'avc1.42E01F', audioCodec: 'mp4a.40.2', mimeType: 'video/mp4', fileExtension: 'mp4' }
-    : { format: 'webm', videoCodec: 'vp09.00.10.08', audioCodec: 'opus', mimeType: 'video/webm', fileExtension: 'webm' };
-
-  const videoCodecCandidates = requestedFormat === 'mp4'
-    ? ['avc1.42E01F', 'avc1.42E01E', 'avc1.4D401F', 'avc1.640028']
-    : [candidate.videoCodec];
-  const latencyModeCandidates: Array<'realtime' | 'quality' | undefined> = requestedFormat === 'mp4'
-    ? ['realtime', 'quality', undefined]
-    : ['realtime', 'quality', undefined];
-  const audioConfigCandidates: AudioEncoderConfig[] = [
-    {
-      codec: candidate.audioCodec,
-      sampleRate: EXPORT_SAMPLE_RATE,
-      numberOfChannels: 2,
-      bitrate: 128_000,
-    },
-    {
-      codec: candidate.audioCodec,
-      sampleRate: EXPORT_SAMPLE_RATE,
-      bitrate: 128_000,
-    } as AudioEncoderConfig,
-  ];
-
-  for (const videoCodec of videoCodecCandidates) {
-    for (const latencyMode of latencyModeCandidates) {
-      const videoConfig: VideoEncoderConfig = {
-        codec: videoCodec,
-        width: EXPORT_WIDTH,
-        height: EXPORT_HEIGHT,
-        bitrate: 12_000_000,
-        framerate: EXPORT_FPS,
-        ...(latencyMode ? { latencyMode } : {}),
-      };
-
-      const videoSupported = await VideoEncoder.isConfigSupported(videoConfig);
-      if (!videoSupported.supported) continue;
-
-      for (const audioConfig of audioConfigCandidates) {
-        const audioSupported = await AudioEncoder.isConfigSupported(audioConfig);
-        if (!audioSupported.supported) continue;
-
-        return {
-          ...candidate,
-          videoCodec,
-          videoConfig: videoSupported.config,
-          audioConfig: audioSupported.config,
-        };
-      }
-    }
-  }
-
-  throw new Error(`${requestedFormat.toUpperCase()} export is not supported in this browser.`);
-}
-
-async function loadMediaAsset(url: string): Promise<LoadedMediaAsset> {
-  const response = await fetch(url);
-  if (!response.ok) {
-    throw new Error(`Failed to fetch ${url}: ${response.status}`);
-  }
-
-  const arrayBuffer = await response.arrayBuffer();
-  const mp4boxFile = (MP4Box as any).createFile();
+function createMediaAssetParser(url: string) {
   const videoSamples: MediaSample[] = [];
   const audioSamples: MediaSample[] = [];
   let videoDescription: ArrayBuffer | undefined;
   let audioDescription: ArrayBuffer | undefined;
   let videoTrack: any = null;
   let audioTrack: any = null;
+  const mp4boxFile = (MP4Box as any).createFile();
 
   const ready = new Promise<void>((resolve, reject) => {
     mp4boxFile.onReady = (info: any) => {
@@ -332,37 +314,158 @@ async function loadMediaAsset(url: string): Promise<LoadedMediaAsset> {
     mp4boxFile.onError = (error: string) => reject(new Error(error));
   });
 
-  const mp4Buffer = arrayBuffer as ArrayBuffer & { fileStart?: number };
-  mp4Buffer.fileStart = 0;
-  mp4boxFile.appendBuffer(mp4Buffer);
-  await ready;
-  mp4boxFile.flush();
+  const appendBuffer = (arrayBuffer: ArrayBuffer, fileStart: number) => {
+    const mp4Buffer = arrayBuffer as ArrayBuffer & { fileStart?: number };
+    mp4Buffer.fileStart = fileStart;
+    mp4boxFile.appendBuffer(mp4Buffer);
+  };
 
-  const result: LoadedMediaAsset = {};
+  const toResult = () => {
+    const result: LoadedMediaAsset = {};
 
-  if (videoTrack) {
-    const videoInfo = videoTrack.video || {};
-    result.video = {
-      codec: videoTrack.codec,
-      width: videoInfo.width ?? videoInfo.coded_width ?? EXPORT_WIDTH,
-      height: videoInfo.height ?? videoInfo.coded_height ?? EXPORT_HEIGHT,
-      description: videoDescription,
-      samples: videoSamples,
-    };
+    if (videoTrack) {
+      const videoInfo = videoTrack.video || {};
+      result.video = {
+        codec: videoTrack.codec,
+        width: videoInfo.width ?? videoInfo.coded_width ?? EXPORT_WIDTH,
+        height: videoInfo.height ?? videoInfo.coded_height ?? EXPORT_HEIGHT,
+        description: videoDescription,
+        samples: videoSamples,
+      };
+    }
+
+    if (audioTrack) {
+      const audioInfo = audioTrack.audio || {};
+      result.audio = {
+        codec: audioTrack.codec,
+        sampleRate: audioInfo.sample_rate ?? audioInfo.sampleRate ?? EXPORT_SAMPLE_RATE,
+        numberOfChannels: audioInfo.channel_count ?? audioInfo.channelCount ?? 2,
+        description: audioDescription,
+        samples: audioSamples,
+      };
+    }
+
+    return result;
+  };
+
+  return {
+    ready,
+    appendBuffer,
+    flush() {
+      mp4boxFile.flush();
+    },
+    toResult,
+  };
+}
+
+async function loadMediaAssetFromBuffer(url: string, arrayBuffer: ArrayBuffer): Promise<LoadedMediaAsset> {
+  const parser = createMediaAssetParser(url);
+  parser.appendBuffer(arrayBuffer, 0);
+  await parser.ready;
+  parser.flush();
+  return parser.toResult();
+}
+
+async function loadMediaAssetFromStream(url: string, response: Response): Promise<LoadedMediaAsset> {
+  const parser = createMediaAssetParser(url);
+  const reader = response.body?.getReader();
+  if (!reader) {
+    return loadMediaAssetFromBuffer(url, await response.arrayBuffer());
   }
 
-  if (audioTrack) {
-    const audioInfo = audioTrack.audio || {};
-    result.audio = {
-      codec: audioTrack.codec,
-      sampleRate: audioInfo.sample_rate ?? audioInfo.sampleRate ?? EXPORT_SAMPLE_RATE,
-      numberOfChannels: audioInfo.channel_count ?? audioInfo.channelCount ?? 2,
-      description: audioDescription,
-      samples: audioSamples,
-    };
+  let fileStart = 0;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (!value || value.byteLength === 0) continue;
+
+    const chunk = value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength);
+    parser.appendBuffer(chunk, fileStart);
+    fileStart += chunk.byteLength;
   }
 
-  return result;
+  await parser.ready;
+  parser.flush();
+  return parser.toResult();
+}
+
+async function loadMediaAsset(url: string): Promise<LoadedMediaAsset> {
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`Failed to fetch ${url}: ${response.status}`);
+  }
+
+  if (shouldStreamMedia(url, response)) {
+    try {
+      return await loadMediaAssetFromStream(url, response);
+    } catch (error) {
+      console.warn(`[ExportWorker] Progressive media load failed for ${url}, retrying with buffered fetch:`, error);
+      const retryResponse = await fetch(url);
+      if (!retryResponse.ok) {
+        throw new Error(`Failed to fetch ${url}: ${retryResponse.status}`);
+      }
+      return loadMediaAssetFromBuffer(url, await retryResponse.arrayBuffer());
+    }
+  }
+
+  return loadMediaAssetFromBuffer(url, await response.arrayBuffer());
+}
+
+async function chooseEncoderChoice(requestedFormat: ExportFormat): Promise<EncoderChoice> {
+  const candidate: EncoderCandidate = requestedFormat === 'mp4'
+    ? { format: 'mp4', videoCodec: 'avc1.42E01F', audioCodec: 'mp4a.40.2', mimeType: 'video/mp4', fileExtension: 'mp4' }
+    : { format: 'webm', videoCodec: 'vp09.00.10.08', audioCodec: 'opus', mimeType: 'video/webm', fileExtension: 'webm' };
+
+  const videoCodecCandidates = requestedFormat === 'mp4'
+    ? ['avc1.42E01F', 'avc1.42E01E', 'avc1.4D401F', 'avc1.640028']
+    : [candidate.videoCodec];
+  const latencyModeCandidates: Array<'realtime' | 'quality' | undefined> = requestedFormat === 'mp4'
+    ? ['realtime', 'quality', undefined]
+    : ['realtime', 'quality', undefined];
+  const audioConfigCandidates: AudioEncoderConfig[] = [
+    {
+      codec: candidate.audioCodec,
+      sampleRate: EXPORT_SAMPLE_RATE,
+      numberOfChannels: 2,
+      bitrate: 128_000,
+    },
+    {
+      codec: candidate.audioCodec,
+      sampleRate: EXPORT_SAMPLE_RATE,
+      bitrate: 128_000,
+    } as AudioEncoderConfig,
+  ];
+
+  for (const videoCodec of videoCodecCandidates) {
+    for (const latencyMode of latencyModeCandidates) {
+      const videoConfig: VideoEncoderConfig = {
+        codec: videoCodec,
+        width: EXPORT_WIDTH,
+        height: EXPORT_HEIGHT,
+        bitrate: 12_000_000,
+        framerate: EXPORT_FPS,
+        ...(latencyMode ? { latencyMode } : {}),
+      };
+
+      const videoSupported = await VideoEncoder.isConfigSupported(videoConfig);
+      if (!videoSupported.supported) continue;
+
+      for (const audioConfig of audioConfigCandidates) {
+        const audioSupported = await AudioEncoder.isConfigSupported(audioConfig);
+        if (!audioSupported.supported) continue;
+
+        return {
+          ...candidate,
+          videoCodec,
+          videoConfig: videoSupported.config,
+          audioConfig: audioSupported.config,
+        };
+      }
+    }
+  }
+
+  throw new Error(`${requestedFormat.toUpperCase()} export is not supported in this browser.`);
 }
 
 async function loadImageAsset(url: string): Promise<ImageBitmap> {
@@ -416,7 +519,7 @@ async function ensureVideoDecoder(asset: DecodedVideoAsset) {
   }
 }
 
-async function ensureVideoFrames(asset: DecodedVideoAsset, targetTime: number, lookAheadSeconds = 1) {
+async function ensureVideoFrames(asset: DecodedVideoAsset, targetTime: number, profiler?: ExportProfiler, lookAheadSeconds = 1) {
   await ensureVideoDecoder(asset);
   throwIfCodecError(asset.decoderError);
 
@@ -425,25 +528,9 @@ async function ensureVideoFrames(asset: DecodedVideoAsset, targetTime: number, l
   }
 
   const targetTimestamp = Math.round((targetTime + lookAheadSeconds) * 1_000_000);
-  asset.pendingDecode = (async () => {
-    while (asset.decodeIndex < asset.samples.length && asset.samples[asset.decodeIndex].timestamp <= targetTimestamp) {
-      const sample = asset.samples[asset.decodeIndex];
-      asset.decoder!.decode(
-        new EncodedVideoChunk({
-          type: sample.isSync ? 'key' : 'delta',
-          timestamp: sample.timestamp,
-          duration: sample.duration,
-          data: sample.data,
-        })
-      );
-      asset.decodeIndex += 1;
-      throwIfCodecError(asset.decoderError);
-    }
+  const trimThreshold = Math.round(Math.max(0, targetTime - 2) * 1_000_000);
 
-    await asset.decoder!.flush();
-    throwIfCodecError(asset.decoderError);
-
-    const trimThreshold = Math.round(Math.max(0, targetTime - 2) * 1_000_000);
+  const trimFrames = () => {
     let removed = 0;
     while (asset.frames.length > 1 && asset.frames[0].timestamp < trimThreshold) {
       const frame = asset.frames.shift();
@@ -454,6 +541,39 @@ async function ensureVideoFrames(asset: DecodedVideoAsset, targetTime: number, l
     if (removed > 0) {
       asset.selectedIndex = Math.max(0, asset.selectedIndex - removed);
     }
+  };
+
+  const bufferedUntil = asset.frames.length > 0 ? asset.frames[asset.frames.length - 1].timestamp : -1;
+  if (bufferedUntil >= targetTimestamp) {
+    trimFrames();
+    return;
+  }
+
+  asset.pendingDecode = (async () => {
+    const stopVideoDecode = profiler?.start('video decode');
+
+    try {
+      while (asset.decodeIndex < asset.samples.length && asset.samples[asset.decodeIndex].timestamp <= targetTimestamp) {
+        const sample = asset.samples[asset.decodeIndex];
+        asset.decoder!.decode(
+          new EncodedVideoChunk({
+            type: sample.isSync ? 'key' : 'delta',
+            timestamp: sample.timestamp,
+            duration: sample.duration,
+            data: sample.data,
+          })
+        );
+        asset.decodeIndex += 1;
+        throwIfCodecError(asset.decoderError);
+      }
+
+      await asset.decoder!.flush();
+      throwIfCodecError(asset.decoderError);
+    } finally {
+      stopVideoDecode?.();
+    }
+
+    trimFrames();
   })();
 
   await asset.pendingDecode;
@@ -473,7 +593,8 @@ function selectVideoFrame(asset: DecodedVideoAsset, localTime: number): VideoFra
   return asset.frames[Math.min(asset.selectedIndex, asset.frames.length - 1)] ?? null;
 }
 
-async function decodeAudioTrack(track: LoadedAudioTrack): Promise<DecodedAudioAsset> {
+async function decodeAudioTrack(track: LoadedAudioTrack, profiler?: ExportProfiler): Promise<DecodedAudioAsset> {
+  const stopAudioDecode = profiler?.start('audio decode');
   const leftChunks: Float32Array[] = [];
   const rightChunks: Float32Array[] = [];
   let totalFrames = 0;
@@ -526,6 +647,7 @@ async function decodeAudioTrack(track: LoadedAudioTrack): Promise<DecodedAudioAs
     await decoder.flush();
     throwIfCodecError(decoderError);
   } finally {
+    stopAudioDecode?.();
     try {
       decoder.close();
     } catch {
@@ -559,75 +681,33 @@ function mixAudioTrack(
   exportSampleRate: number,
   gain: number
 ) {
-  const exportDuration = Math.max(0, exportRange.end - exportRange.start);
-  const clipStart = Math.max(0, clip.timelinePosition.start - exportRange.start);
-  const clipEnd = Math.min(exportDuration, clip.timelinePosition.end - exportRange.start);
-  if (clipEnd <= clipStart) return;
+  const mixRange = buildAudioMixRange(clip, exportRange, exportSampleRate, decoded.sampleRate, gain);
+  if (!mixRange) return;
 
-  const sourceOffset = clip.sourceStart;
-  const targetStart = Math.max(0, Math.floor(clipStart * exportSampleRate));
-  const targetEnd = Math.min(masterLeft.length, Math.ceil(clipEnd * exportSampleRate));
-  const sourceStart = Math.max(0, sourceOffset * decoded.sampleRate);
   const sourceLimit = decoded.left.length - 1;
+  let sourcePosition = mixRange.sourcePositionStart;
+  const chunkSize = 4096;
 
-  for (let targetIndex = targetStart; targetIndex < targetEnd; targetIndex += 1) {
-    const exportTime = targetIndex / exportSampleRate;
-    const sourcePosition = sourceStart + (exportTime - clipStart) * decoded.sampleRate;
-    const sourceIndex = Math.max(0, Math.min(sourceLimit, sourcePosition));
-    const lower = Math.floor(sourceIndex);
-    const upper = Math.min(sourceLimit, lower + 1);
-    const mix = sourceIndex - lower;
+  for (let chunkStart = mixRange.targetStart; chunkStart < mixRange.targetEnd; chunkStart += chunkSize) {
+    const chunkEnd = Math.min(mixRange.targetEnd, chunkStart + chunkSize);
 
-    const left = decoded.left[lower] * (1 - mix) + decoded.left[upper] * mix;
-    const right = decoded.right[lower] * (1 - mix) + decoded.right[upper] * mix;
-    masterLeft[targetIndex] += left * gain;
-    masterRight[targetIndex] += right * gain;
+    for (let targetIndex = chunkStart; targetIndex < chunkEnd; targetIndex += 1) {
+      const sourceIndex = Math.max(0, Math.min(sourceLimit, sourcePosition));
+      const lower = Math.floor(sourceIndex);
+      const upper = Math.min(sourceLimit, lower + 1);
+      const mix = sourceIndex - lower;
+
+      const left = decoded.left[lower] * (1 - mix) + decoded.left[upper] * mix;
+      const right = decoded.right[lower] * (1 - mix) + decoded.right[upper] * mix;
+      masterLeft[targetIndex] += left * mixRange.gain;
+      masterRight[targetIndex] += right * mixRange.gain;
+      sourcePosition += mixRange.sourceStep;
+    }
   }
 }
 
-function createActiveClipCursor(plan: ReturnType<typeof buildExportPlan>) {
-  const events = plan.clipEvents.slice();
-  const active = new Map<number, VideoClip>();
-  const ordered: VideoClip[] = [];
-  let eventIndex = 0;
-
-  const compareClips = (left: VideoClip, right: VideoClip) => {
-    const leftOrder = plan.trackOrderById.get(left.trackId) ?? 0;
-    const rightOrder = plan.trackOrderById.get(right.trackId) ?? 0;
-    if (leftOrder !== rightOrder) return rightOrder - leftOrder;
-    if (left.timelinePosition.start !== right.timelinePosition.start) {
-      return left.timelinePosition.start - right.timelinePosition.start;
-    }
-    return left.id - right.id;
-  };
-
-  return {
-    advanceTo(time: number) {
-      let changed = false;
-      while (eventIndex < events.length && events[eventIndex].time <= time + 1e-6) {
-        const event = events[eventIndex];
-        if (event.kind === 'start') {
-          active.set(event.clip.id, event.clip);
-        } else {
-          active.delete(event.clip.id);
-        }
-        changed = true;
-        eventIndex += 1;
-      }
-
-      if (changed) {
-        ordered.length = 0;
-        for (const clip of active.values()) ordered.push(clip);
-        ordered.sort(compareClips);
-      }
-    },
-    getActiveClips() {
-      return ordered;
-    },
-  };
-}
-
 async function runExport(message: ExportJobMessage) {
+  const profiler = createExportProfiler();
   const { clips, tracks, exportRange, format } = message;
   const plan = buildExportPlan(clips, tracks, exportRange);
   const encoderChoice = await chooseEncoderChoice(format);
@@ -671,12 +751,13 @@ async function runExport(message: ExportJobMessage) {
     return asset;
   };
 
-  const visibleTracks = plan.visibleTracks.filter((track) => track.isVisible);
+  const visibleTracks = plan.visibleTracks;
   const lutTracks = visibleTracks.filter((track) => track.lutConfig?.enabled && track.lutConfig.url);
   const videoOrAudioClips = plan.exportClips.filter((clip) => clip.type === TrackType.VIDEO || clip.type === TrackType.SCREEN || clip.type === TrackType.AUDIO);
   const imageClips = plan.exportClips.filter((clip) => clip.type === TrackType.IMAGE);
 
   postProgress(5, 'Loading LUTs');
+  const stopLutLoad = profiler.start('LUT loading');
   for (const track of lutTracks) {
     try {
       const response = await fetch(track.lutConfig!.url);
@@ -690,8 +771,10 @@ async function runExport(message: ExportJobMessage) {
       console.warn(`[ExportWorker] Failed to load LUT for track ${track.id}:`, error);
     }
   }
+  stopLutLoad();
 
   postProgress(12, 'Loading media');
+  const stopMediaLoad = profiler.start('media loading');
   await Promise.all([
     ...videoOrAudioClips
       .filter((clip) => clip.videoUrl)
@@ -707,6 +790,7 @@ async function runExport(message: ExportJobMessage) {
         imageAssetsByClipId.set(clip.id, await getImageAsset(clip.thumbnailUrl!));
       }),
   ]);
+  stopMediaLoad();
 
   postProgress(28, 'Decoding audio');
   const exportDuration = plan.exportDuration;
@@ -715,6 +799,7 @@ async function runExport(message: ExportJobMessage) {
   const masterLeft = new Float32Array(masterFrameCount);
   const masterRight = new Float32Array(masterFrameCount);
 
+  const stopAudioMix = profiler.start('audio mixing');
   await Promise.all(
     videoOrAudioClips
       .filter((clip) => clip.videoUrl)
@@ -727,10 +812,10 @@ async function runExport(message: ExportJobMessage) {
 
         let decoded = audioAssetsByUrl.get(clip.videoUrl!);
         if (!decoded) {
-          decoded = media.audio ? decodeAudioTrack(media.audio).catch((error) => {
+          decoded = decodeAudioTrack(media.audio, profiler).catch((error) => {
             console.warn(`[ExportWorker] Failed to decode audio for ${clip.videoUrl}:`, error);
             return null;
-          }) : Promise.resolve(null);
+          });
           audioAssetsByUrl.set(clip.videoUrl!, decoded);
         }
 
@@ -748,6 +833,7 @@ async function runExport(message: ExportJobMessage) {
         );
       })
   );
+  stopAudioMix();
 
   const muxer = encoderChoice.format === 'mp4'
     ? new MP4Muxer({
@@ -788,15 +874,15 @@ async function runExport(message: ExportJobMessage) {
     sampleRate,
   });
 
-  const cursor = createActiveClipCursor(plan);
+  const cursor = createExportCursor(plan);
   const videoSourceMap: Record<number, VideoFrame | null> = {};
   const imageSourceMap: Record<number, ImageBitmap | null> = {};
-  const frameDurationUs = Math.round(1_000_000 / plan.fps);
   const textLayoutCache = new Map<number, { signature: string; width: number }>();
+  const stopRendering = profiler.start('frame rendering');
 
   for (let frameIndex = 0; frameIndex < plan.totalFrames; frameIndex += 1) {
-    const time = exportRange.start + frameIndex / plan.fps;
-    const timestamp = frameIndex * frameDurationUs;
+    const time = plan.frameTimes[frameIndex];
+    const timestamp = plan.frameTimestampsUs[frameIndex];
 
     if (frameIndex % 30 === 0 || frameIndex === plan.totalFrames - 1) {
       postProgress(30 + ((frameIndex + 1) / Math.max(1, plan.totalFrames)) * 60, `Rendering ${frameIndex + 1}/${plan.totalFrames}`);
@@ -804,7 +890,9 @@ async function runExport(message: ExportJobMessage) {
 
     cursor.advanceTo(time);
     const activeClips = cursor.getActiveClips();
-    const videoClips = activeClips.filter((clip) => clip.type === TrackType.VIDEO || clip.type === TrackType.SCREEN);
+    const videoClips = cursor.getActiveVideoClips();
+    const imageClipsForFrame = cursor.getActiveImageClips();
+    const textClipsForFrame = cursor.getActiveTextClips();
 
     await Promise.all(
       videoClips.map(async (clip) => {
@@ -813,24 +901,23 @@ async function runExport(message: ExportJobMessage) {
         if (!media?.video || !asset) return;
 
         const localTime = time - clip.timelinePosition.start + clip.sourceStart;
-        await ensureVideoFrames(asset, localTime);
+        await ensureVideoFrames(asset, localTime, profiler);
         videoSourceMap[clip.id] = selectVideoFrame(asset, localTime);
       })
     );
 
-    for (const clip of activeClips) {
-      if (clip.type === TrackType.IMAGE) {
-        imageSourceMap[clip.id] = imageAssetsByClipId.get(clip.id) ?? null;
-      }
+    for (const clip of imageClipsForFrame) {
+      imageSourceMap[clip.id] = imageAssetsByClipId.get(clip.id) ?? null;
     }
 
+    const frameRenderStart = profiler.start('frame compositing');
     renderer.render(activeClips, tracks, videoSourceMap, imageSourceMap, lutTextures, true, trackById);
 
     compositeCtx.fillStyle = '#000000';
     compositeCtx.fillRect(0, 0, EXPORT_WIDTH, EXPORT_HEIGHT);
     compositeCtx.drawImage(gpuCanvas, 0, 0);
 
-    for (const clip of activeClips) {
+    for (const clip of textClipsForFrame) {
       if (clip.type !== TrackType.TEXT && clip.type !== TrackType.SUBTITLE) continue;
 
       const transform = {
@@ -853,7 +940,7 @@ async function runExport(message: ExportJobMessage) {
       const fontWeight = clip.style?.fontWeight || 'normal';
       const fontStyle = clip.style?.fontStyle || 'normal';
       const fontStretch = clip.style?.fontStretch ? `${clip.style.fontStretch} ` : '';
-      const fontSignature = `${fontStyle}|${fontWeight}|${fontStretch}${baseFontSize}|${fontFamily}|${clip.content || ''}|${clip.style?.backgroundColor || ''}|${clip.style?.color || ''}`;
+      const fontSignature = plan.textLayoutSignatureByClipId.get(clip.id) ?? buildTextLayoutSignature(clip);
       const cached = textLayoutCache.get(clip.id);
       let measuredWidth = cached?.signature === fontSignature ? cached.width : 0;
 
@@ -878,18 +965,27 @@ async function runExport(message: ExportJobMessage) {
       compositeCtx.restore();
     }
 
+    frameRenderStart();
+
     const frame = new VideoFrame(compositeCanvas, {
       timestamp,
-      duration: frameDurationUs,
+      duration: Math.round(1_000_000 / plan.fps),
     });
-    videoEncoder.encode(frame);
-    frame.close();
+    const stopVideoEncode = profiler.start('video encode');
+    try {
+      videoEncoder.encode(frame);
+    } finally {
+      stopVideoEncode();
+      frame.close();
+    }
     throwIfCodecError(videoEncoderError);
     throwIfCodecError(audioEncoderError);
   }
+  stopRendering();
 
   postProgress(95, 'Encoding audio');
   const audioChunkSamples = Math.max(8192, Math.round(sampleRate / 4));
+  const stopAudioEncode = profiler.start('audio encode');
   for (let start = 0; start < masterFrameCount; start += audioChunkSamples) {
     const frames = Math.min(audioChunkSamples, masterFrameCount - start);
     const interleaved = new Float32Array(frames * 2);
@@ -914,8 +1010,10 @@ async function runExport(message: ExportJobMessage) {
     throwIfCodecError(videoEncoderError);
     throwIfCodecError(audioEncoderError);
   }
+  stopAudioEncode();
 
   postProgress(98, 'Finalizing encoders');
+  const stopFinalize = profiler.start('finalizing');
   await videoEncoder.flush();
   await audioEncoder.flush();
   throwIfCodecError(videoEncoderError);
@@ -923,6 +1021,8 @@ async function runExport(message: ExportJobMessage) {
   videoEncoder.close();
   audioEncoder.close();
   muxer.finalize();
+  stopFinalize();
+  profiler.logSummary();
 
   const target = muxer.target as WebMArrayBufferTarget | MP4ArrayBufferTarget;
   const mimeType = encoderChoice.mimeType;

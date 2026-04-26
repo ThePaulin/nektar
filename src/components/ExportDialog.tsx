@@ -143,6 +143,7 @@ function closeAudioContext(audioContext: AudioContext | null) {
 export const ExportDialog: React.FC<ExportDialogProps> = ({ clips, tracks, exportRange, onClose }) => {
   const [status, setStatus] = useState<'idle' | 'exporting' | 'completed' | 'error'>('idle');
   const [progress, setProgress] = useState(0);
+  const [progressMessage, setProgressMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [format, setFormat] = useState<ExportFormat>(
     typeof MediaRecorder !== 'undefined' && (
@@ -183,6 +184,7 @@ export const ExportDialog: React.FC<ExportDialogProps> = ({ clips, tracks, expor
 
           if (data.type === 'progress' && typeof data.progress === 'number') {
             setProgress(data.progress);
+            setProgressMessage(typeof data.message === 'string' ? data.message : null);
             return;
           }
 
@@ -619,6 +621,7 @@ export const ExportDialog: React.FC<ExportDialogProps> = ({ clips, tracks, expor
   const startExport = async () => {
     setStatus('exporting');
     setProgress(0);
+    setProgressMessage(null);
     setError(null);
 
     let result: ExportResult | null = null;
@@ -648,6 +651,7 @@ export const ExportDialog: React.FC<ExportDialogProps> = ({ clips, tracks, expor
 
       downloadBlob(result.buffer, result.mimeType, `sequence-export-${Date.now()}.${result.fileExtension}`);
       setProgress(100);
+      setProgressMessage(null);
       setStatus('completed');
     } catch (exportError) {
       if (workerError) {
@@ -658,6 +662,7 @@ export const ExportDialog: React.FC<ExportDialogProps> = ({ clips, tracks, expor
 
       const resolvedError = exportError instanceof Error ? exportError : workerError instanceof Error ? workerError : new Error('Export failed');
       setError(resolvedError.message);
+      setProgressMessage(null);
       setStatus('error');
     }
   };
@@ -732,6 +737,9 @@ export const ExportDialog: React.FC<ExportDialogProps> = ({ clips, tracks, expor
                 />
               </div>
               <span className="text-xs text-gray-400 font-medium">{Math.round(progress)}% Complete</span>
+              {progressMessage && (
+                <span className="text-xs text-gray-500 font-medium mt-2">{progressMessage}</span>
+              )}
             </>
           )}
 
