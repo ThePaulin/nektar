@@ -1,20 +1,65 @@
-<div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
-</div>
+# Nektar
 
-# Run and deploy your AI Studio app
+A dense, timeline-first browser-based video editor for fast clip assembly, recording, trimming, and export.
 
-This contains everything you need to run your app locally.
+## Features
 
-View your app in AI Studio: https://ai.studio/apps/a841f104-4b37-4cf1-9299-b2851b3a03e6
+- **Multitrack Timeline** - Drag, trim, split, delete, duplicate, and reorder clips across multiple tracks
+- **Video Recording** - Capture from camera, screen, or overlay sources
+- **Audio Recording** - Separate audio capture alongside the main editor
+- **Clip Properties Panel** - Adjust transforms, filters, brightness, saturation, opacity, and crop
+- **Text & Subtitles** - Create and style text overlays with typography controls
+- **Track LUT Processing** - Apply color grading via lookup tables
+- **WebGL/WebGPU Rendering** - Hardware-accelerated preview and export
+- **Session Persistence** - IndexedDB stores projects locally for seamless recovery
+- **Export** - Render to MP4 or WebM with configurable quality
 
-## Run Locally
+## Tech Stack
 
-**Prerequisites:**  Node.js
+React 19, TypeScript, Vite, Express, Tailwind CSS
 
+## Prerequisites
 
-1. Install dependencies:
-   `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
-   `npm run dev`
+- Node.js
+- Modern browser with WebGPU support (Chrome/Edge recommended)
+
+## Quick Start
+
+```bash
+npm install
+npm run dev
+```
+
+Open `http://localhost:5173` in your browser.
+
+## Commands
+
+| Command | Description |
+|---|---|
+| `npm run dev` | Start development server |
+| `npm run build` | Build for production |
+| `npm run lint` | TypeScript type checking |
+| `npm run test` | Run unit tests |
+| `npm run test:e2e` | Run Playwright e2e tests |
+| `npm run test:all` | Run all tests |
+
+## Project Structure
+
+```
+src/
+  components/     # UI components (Timeline, VideoPreview, ExportDialog, etc.)
+  lib/            # Core logic (editor-operations, lut, export, webgl/webgpu)
+  services/       # Database persistence (db.ts)
+
+tests/
+  components/     # Component tests
+  e2e/            # Playwright e2e tests
+  unit/           # Unit tests
+
+server.ts         # Express dev server with media proxy
+```
+
+## Further Reading
+
+- [Design System](./DESIGN.md) - Visual theme, color palette, typography
+- [Project Overview](./PROJECT.md) - Architecture and implementation details
