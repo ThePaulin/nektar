@@ -151,3 +151,67 @@ export interface RecordingSession {
   partialRecordings: Partial<Record<RecordingSource, RecordingMediaSnapshot>>;
   liveSources: Partial<Record<RecordingSource, RecordingLiveSource>>;
 }
+
+export type ExportProgressStage = 'prepare' | 'audio' | 'render' | 'finalize';
+
+export interface ExportOptions {
+  format: 'mp4' | 'webm';
+  width: number;
+  height: number;
+  fps: number;
+  range: { start: number; end: number };
+  onProgress?: (progress: number, stage: ExportProgressStage) => void;
+  onCancel?: () => boolean;
+}
+
+export interface ExportResult {
+  blob: Blob;
+  format: ExportOptions['format'];
+  duration: number;
+}
+
+export interface ExportAsset {
+  key: string;
+  kind: 'media' | 'image';
+  sourceUrl: string;
+  fetchUrl: string;
+  blobId?: string;
+  hasAudio: boolean;
+  width?: number;
+  height?: number;
+  duration?: number;
+}
+
+export interface ResolvedClipTransform {
+  position: { x: number; y: number; z: number };
+  rotation: number;
+  flipHorizontal: boolean;
+  flipVertical: boolean;
+  scale: { x: number; y: number };
+  opacity: number;
+  crop: { top: number; right: number; bottom: number; left: number };
+}
+
+export interface PreparedExportClip {
+  clip: VideoClip;
+  assetKey?: string;
+  timelineStart: number;
+  timelineEnd: number;
+  exportStart: number;
+  exportEnd: number;
+  sourceOffset: number;
+  volume: number;
+  isMuted: boolean;
+  trackOrder: number;
+  transform: ResolvedClipTransform;
+}
+
+export interface PreparedExportScene {
+  range: { start: number; end: number };
+  duration: number;
+  width: number;
+  height: number;
+  fps: number;
+  assets: ExportAsset[];
+  clips: PreparedExportClip[];
+}
