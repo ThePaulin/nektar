@@ -7,7 +7,21 @@ import { Recorder } from './components/Recorder';
 import { AudioRecorder } from './components/AudioRecorder';
 import { ClipPropertiesPanel } from './components/ClipPropertiesPanel';
 import { TrackActionArea } from './components/TrackActionArea';
-import { VideoObjType, VideoClip, RecordingMode, Track, TrackType, RecordingSource } from './types';
+import {
+  DraftClipTemplate,
+  RecordingCompletePayload,
+  RecordingMediaSnapshot,
+  RecordingMode,
+  RecordingOverlayRect,
+  RecordingProgressPayload,
+  RecordingSession,
+  RecordingSource,
+  RecordingStartPayload,
+  Track,
+  TrackType,
+  VideoClip,
+  VideoObjType,
+} from './types';
 import {
   createTrackBundle,
   deleteClipsState,
@@ -19,6 +33,12 @@ import {
   splitClipState,
   trimClipState,
 } from './lib/editor-operations';
+import {
+  buildRealtimeRecordingClips,
+  buildRealtimeRecordingClipsAtDuration,
+  finalizeRecordingClips,
+  updateRecordingSessionProgress,
+} from './lib/recording-session';
 import { videoDB } from './services/db';
 import {
   Play, Pause, SkipBack, SkipForward, Video, Download, Undo2, Redo2, Radio,
@@ -72,7 +92,6 @@ export default function App() {
   const [tracks, setTracks] = useState<Track[]>(INITIAL_TRACKS);
   const [selectedTrackId, setSelectedTrackId] = useState<string>(INITIAL_TRACKS[0].id);
   const [isInitialized, setIsInitialized] = useState(false);
-  const [recordingStartTime, setRecordingStartTime] = useState(0);
   const [recordingMode, setRecordingMode] = useState<RecordingMode>('insert');
   const [isExportMenuOpen, setIsExportMenuOpen] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
@@ -97,9 +116,26 @@ export default function App() {
   const [exportRange, setExportRange] = useState<{ start: number; end: number }>({ start: 0, end: 60 });
   const [totalDuration, setTotalDuration] = useState(60);
   const [isPlaying, setIsPlaying] = useState(false);
+  const [recordingSession, setRecordingSession] = useState<RecordingSession | null>(null);
+  const isRecordingLocked = !!recordingSession?.isActive;
   const playbackRef = useRef<number | null>(null);
+  const currentTimeRef = useRef(0);
+  const isPlayingRef = useRef(false);
+  const recordingSessionRef = useRef<RecordingSession | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const lutWorkerRef = useRef<Worker | null>(null);
+
+  useEffect(() => {
+    currentTimeRef.current = currentTime;
+  }, [currentTime]);
+
+  useEffect(() => {
+    isPlayingRef.current = isPlaying;
+  }, [isPlaying]);
+
+  useEffect(() => {
+    recordingSessionRef.current = recordingSession;
+  }, [recordingSession]);
 
   useEffect(() => {
     // Initialize LUT worker
@@ -372,6 +408,7 @@ export default function App() {
   };
 
   const undo = useCallback(() => {
+    if (isRecordingLocked) return;
     if (past.length === 0) return;
     const previous = past[past.length - 1];
     const newPast = past.slice(0, past.length - 1);
@@ -379,9 +416,10 @@ export default function App() {
     setFuture((prev) => [clips, ...prev]);
     setClips(previous);
     setPast(newPast);
-  }, [past, clips]);
+  }, [isRecordingLocked, past, clips]);
 
   const redo = useCallback(() => {
+    if (isRecordingLocked) return;
     if (future.length === 0) return;
     const next = future[0];
     const newFuture = future.slice(1);
@@ -389,7 +427,7 @@ export default function App() {
     setPast((prev) => [...prev, clips]);
     setClips(next);
     setFuture(newFuture);
-  }, [future, clips]);
+  }, [isRecordingLocked, future, clips]);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -430,8 +468,12 @@ export default function App() {
     };
   }, [isPlaying]);
 
-  const togglePlay = () => setIsPlaying(!isPlaying);
+  const togglePlay = () => {
+    if (isRecordingLocked) return;
+    setIsPlaying(!isPlaying);
+  };
   const reset = () => {
+    if (isRecordingLocked) return;
     setIsPlaying(false);
     setCurrentTime(0);
   };
@@ -452,7 +494,133 @@ export default function App() {
     return getRecordingStartTime(recordingMode, currentTime, clips, selectedTrackId);
   }, [recordingMode, currentTime, clips, selectedTrackId]);
 
-  const handleStartRecording = () => {
+  const getRecordingTransform = (
+    overlayRect: RecordingOverlayRect | undefined,
+    recording: RecordingMediaSnapshot | undefined,
+  ) => {
+    if (!overlayRect || !recording?.width || !recording?.height) return undefined;
+
+    const { x, y, width: w, height: h } = overlayRect;
+    const camWidth = recording.width;
+    const camHeight = recording.height;
+    const minDim = Math.min(camWidth, camHeight);
+    const cropL = ((camWidth - minDim) / 2 / camWidth) * 100;
+    const cropT = ((camHeight - minDim) / 2 / camHeight) * 100;
+    const scale = 1280 / 1920;
+    const x1280 = x * scale;
+    const y1280 = y * scale;
+    const w1280 = w * scale;
+    const h1280 = h * scale;
+
+    return {
+      position: {
+        x: (x1280 + w1280 / 2) - 1280 / 2,
+        y: (y1280 + h1280 / 2) - 720 / 2,
+        z: 0,
+      },
+      rotation: 0,
+      scale: {
+        x: w1280 / 1280,
+        y: h1280 / 720,
+      },
+      opacity: 1,
+      crop: {
+        top: cropT,
+        right: cropL,
+        bottom: cropT,
+        left: cropL,
+      },
+    };
+  };
+
+  const createRecordingDraftTemplates = useCallback((
+    targetTrack: Track,
+    source: RecordingSource,
+    overlayRect?: RecordingOverlayRect,
+  ): DraftClipTemplate[] => {
+    const baseId = Date.now();
+
+    if (targetTrack.type === TrackType.VIDEO || targetTrack.type === TrackType.SCREEN) {
+      const cameraSubTrack = tracks.find((track) => track.parentId === targetTrack.id && track.subTrackType === 'camera');
+      const screenSubTrack = tracks.find((track) => track.parentId === targetTrack.id && track.subTrackType === 'screen');
+
+      if (source === 'overlay' || overlayRect) {
+        const placeholderId = baseId;
+        const cameraId = baseId + 1;
+        const screenId = baseId + 2;
+        return [
+          {
+            id: placeholderId,
+            trackId: targetTrack.id,
+            type: targetTrack.type,
+            label: `Group: ${new Date().toLocaleTimeString()}`,
+            duration: 0,
+            sourceStart: 0,
+            isPlaceholder: true,
+            childClipIds: [cameraId, screenId],
+          },
+          ...(cameraSubTrack ? [{
+            id: cameraId,
+            trackId: cameraSubTrack.id,
+            type: TrackType.VIDEO,
+            label: `Camera ${new Date().toLocaleTimeString()}`,
+            source: 'camera' as RecordingSource,
+            duration: 0,
+            sourceStart: 0,
+            overlayRect,
+          }] : []),
+          ...(screenSubTrack ? [{
+            id: screenId,
+            trackId: screenSubTrack.id,
+            type: TrackType.VIDEO,
+            label: `Screen ${new Date().toLocaleTimeString()}`,
+            source: 'screen' as RecordingSource,
+            duration: 0,
+            sourceStart: 0,
+          }] : []),
+        ];
+      }
+
+      const targetSubTrack = source === 'screen' ? screenSubTrack : cameraSubTrack;
+      if (targetSubTrack) {
+        const placeholderId = baseId;
+        const childId = baseId + 1;
+        return [
+          {
+            id: placeholderId,
+            trackId: targetTrack.id,
+            type: targetTrack.type,
+            label: `Group: ${new Date().toLocaleTimeString()}`,
+            duration: 0,
+            sourceStart: 0,
+            isPlaceholder: true,
+            childClipIds: [childId],
+          },
+          {
+            id: childId,
+            trackId: targetSubTrack.id,
+            type: TrackType.VIDEO,
+            label: `${source === 'screen' ? 'Screen' : 'Camera'} ${new Date().toLocaleTimeString()}`,
+            source,
+            duration: 0,
+            sourceStart: 0,
+          },
+        ];
+      }
+    }
+
+    return [{
+      id: baseId,
+      trackId: targetTrack.id,
+      type: targetTrack.type,
+      label: targetTrack.type === TrackType.IMAGE ? `Photo ${new Date().toLocaleTimeString()}` : `Recording ${new Date().toLocaleTimeString()}`,
+      source: 'camera',
+      duration: 0,
+      sourceStart: 0,
+    }];
+  }, [tracks]);
+
+  const handleStartRecording = (payload: RecordingStartPayload) => {
     const targetTrack = tracks.find(t => t.id === selectedTrackId);
     if (!targetTrack) return;
 
@@ -463,200 +631,137 @@ export default function App() {
       }
     }
 
-    setIsPlaying(false);
     const startTime = getModeStartTime();
-    setRecordingStartTime(startTime);
-    if (recordingMode === 'append') {
+    const sessionId = `recording-${Date.now()}`;
+    const draftTemplates = createRecordingDraftTemplates(targetTrack, payload.source, payload.overlayRect);
+    const nextSession: RecordingSession = {
+      id: sessionId,
+      startTime,
+      duration: 0,
+      isActive: true,
+      isPaused: false,
+      source: payload.source,
+      overlayRect: payload.overlayRect,
+      affectedTrackIds: draftTemplates.map((template) => template.trackId),
+      draftTemplates,
+      originalClips: clips,
+      partialRecordings: {},
+      liveSources: Object.fromEntries((payload.liveSources ?? []).map((entry) => [entry.source, entry])),
+    };
+
+    setRecordingSession(nextSession);
+    setClips(buildRealtimeRecordingClipsAtDuration(nextSession, 0));
+    if (!isPlayingRef.current) {
       setCurrentTime(startTime);
+      setIsPlaying(true);
     }
   };
 
-  const handleRecordingComplete = async (
-    videoUrl: string,
-    duration: number,
-    blob: Blob,
-    overlayRect?: { x: number; y: number; width: number; height: number },
-    source?: RecordingSource,
-    multiRecordings?: { source: RecordingSource, url: string, blob: Blob, width?: number, height?: number }[]
-  ) => {
-    const targetTrack = tracks.find(t => t.id === selectedTrackId);
-    if (!targetTrack) return;
+  const handleRecordingPause = () => {
+    setIsPlaying(false);
+    setRecordingSession((prev) => {
+      if (!prev) return prev;
+      const pausedDuration = Math.max(prev.duration, currentTimeRef.current - prev.startTime);
+      const nextSession = { ...prev, isActive: false, isPaused: true, duration: pausedDuration };
+      setClips(buildRealtimeRecordingClipsAtDuration(nextSession, pausedDuration));
+      return nextSession;
+    });
+  };
 
-    if (targetTrack.isLocked) {
+  const handleRecordingResume = () => {
+    setRecordingSession((prev) => (prev ? { ...prev, isActive: true, isPaused: false } : prev));
+    setIsPlaying(true);
+  };
+
+  const handleRecordingStop = () => {
+    setIsPlaying(false);
+    setRecordingSession((prev) => {
+      if (!prev) return prev;
+      const finalDuration = Math.max(prev.duration, currentTimeRef.current - prev.startTime);
+      const nextSession = {
+        ...prev,
+        isActive: false,
+        isPaused: false,
+        duration: finalDuration,
+      };
+      setCurrentTime(nextSession.startTime + finalDuration);
+      setClips(buildRealtimeRecordingClipsAtDuration(nextSession, finalDuration));
+      return nextSession;
+    });
+  };
+
+  const handleRecordingProgress = (payload: RecordingProgressPayload) => {
+    setRecordingSession((prev) => {
+      if (!prev) return prev;
+      const nextSession = updateRecordingSessionProgress(
+        {
+          ...prev,
+          isActive: true,
+          isPaused: false,
+          overlayRect: payload.overlayRect ?? prev.overlayRect,
+        },
+        payload.duration,
+        Object.fromEntries(payload.recordings.map((recording) => [recording.source, recording])),
+        Object.fromEntries((payload.liveSources ?? []).map((entry) => [entry.source, entry])),
+      );
+      const visibleDuration = nextSession.isPaused
+        ? nextSession.duration
+        : Math.max(nextSession.duration, currentTimeRef.current - nextSession.startTime, 0);
+      setClips(buildRealtimeRecordingClipsAtDuration(nextSession, visibleDuration));
+      return nextSession;
+    });
+  };
+
+  const handleRecordingComplete = async (payload: RecordingCompletePayload) => {
+    const activeSession = recordingSessionRef.current;
+    if (!activeSession) return;
+
+    const hasLockedTrack = activeSession.draftTemplates.some((template) => isTrackLocked(template.trackId));
+    if (hasLockedTrack) {
       alert('This track is locked and cannot be modified.');
       return;
     }
 
-    const newId = Date.now();
-    const blobId = `blob_${newId}`;
-    const isImage = targetTrack.type === TrackType.IMAGE;
-    const finalDuration = isImage ? 5 : duration;
+    const recordingLookup = Object.fromEntries(payload.recordings.map((recording) => [recording.source, recording]));
+    const sessionWithProgress = updateRecordingSessionProgress(
+      {
+        ...activeSession,
+        isActive: false,
+        isPaused: false,
+        overlayRect: payload.overlayRect ?? activeSession.overlayRect,
+      },
+      payload.duration,
+      recordingLookup,
+      activeSession.liveSources,
+    );
+    let finalClips = finalizeRecordingClips(sessionWithProgress, recordingLookup);
+    const draftClipIds = new Set(sessionWithProgress.draftTemplates.map((template) => template.id));
+    const overlayRect = payload.overlayRect ?? sessionWithProgress.overlayRect;
+    const cameraRecording = recordingLookup.camera;
 
-    const newClips: VideoClip[] = [];
-    const baseId = Date.now();
+    finalClips = finalClips.map((clip) => {
+      if (!draftClipIds.has(clip.id)) return clip;
 
-    if (targetTrack.type === TrackType.VIDEO || targetTrack.type === TrackType.SCREEN) {
-      const cameraSubTrack = tracks.find(t => t.parentId === targetTrack.id && t.subTrackType === 'camera');
-      const screenSubTrack = tracks.find(t => t.parentId === targetTrack.id && t.subTrackType === 'screen');
+      const template = sessionWithProgress.draftTemplates.find((entry) => entry.id === clip.id);
+      const source = template?.source;
+      const recording = source ? recordingLookup[source] : undefined;
 
-      const placeholderId = baseId;
-      const childIds: number[] = [];
-      let nextId = baseId + 1;
-
-      if (source === 'overlay' || overlayRect) {
-        const camRec = multiRecordings?.find(r => r.source === 'camera');
-        const screenRec = multiRecordings?.find(r => r.source === 'screen');
-
-        if (cameraSubTrack) {
-          const camId = nextId++;
-          childIds.push(camId);
-          
-          let transform;
-          if (overlayRect && camRec?.width && camRec?.height) {
-            const { x, y, width: w, height: h } = overlayRect;
-            const camWidth = camRec.width;
-            const camHeight = camRec.height;
-            const minDim = Math.min(camWidth, camHeight);
-            
-            const cropL = ((camWidth - minDim) / 2 / camWidth) * 100;
-            const cropT = ((camHeight - minDim) / 2 / camHeight) * 100;
-
-            // Convert 1920x1080 overlayRect to 1280x720 reference space
-            const scale = 1280 / 1920;
-            const x1280 = x * scale;
-            const y1280 = y * scale;
-            const w1280 = w * scale;
-            const h1280 = h * scale;
-
-            transform = {
-              position: {
-                x: (x1280 + w1280 / 2) - 1280 / 2,
-                y: (y1280 + h1280 / 2) - 720 / 2,
-                z: 0
-              },
-              rotation: 0,
-              scale: {
-                x: w1280 / 1280,
-                y: h1280 / 720
-              },
-              opacity: 1,
-              crop: {
-                top: cropT,
-                right: cropL,
-                bottom: cropT,
-                left: cropL
-              }
-            };
-          }
-
-          newClips.push({
-            id: camId,
-            trackId: cameraSubTrack.id,
-            type: TrackType.VIDEO,
-            label: `Camera ${new Date().toLocaleTimeString()}`,
-            videoUrl: camRec?.url || videoUrl,
-            thumbnailUrl: `https://picsum.photos/seed/${camId}/200/120`,
-            duration: finalDuration,
-            sourceStart: 0,
-            timelinePosition: { start: recordingStartTime, end: recordingStartTime + finalDuration },
-            blobId: `blob_${camId}`,
-            overlayRect, // Camera clip has the overlay rect
-            transform,
-          });
-        }
-        if (screenSubTrack) {
-          const screenId = nextId++;
-          childIds.push(screenId);
-          newClips.push({
-            id: screenId,
-            trackId: screenSubTrack.id,
-            type: TrackType.VIDEO,
-            label: `Screen ${new Date().toLocaleTimeString()}`,
-            videoUrl: screenRec?.url || videoUrl,
-            thumbnailUrl: `https://picsum.photos/seed/${screenId}/200/120`,
-            duration: finalDuration,
-            sourceStart: 0,
-            timelinePosition: { start: recordingStartTime, end: recordingStartTime + finalDuration },
-            blobId: `blob_${screenId}`,
-            // Screen clip does NOT have the overlay rect (it's the full screen)
-          });
-        }
-      } else {
-        // Single track
-        const subTrack = source === 'screen' ? screenSubTrack : cameraSubTrack;
-        if (subTrack) {
-          const subId = nextId++;
-          childIds.push(subId);
-          newClips.push({
-            id: subId,
-            trackId: subTrack.id,
-            type: TrackType.VIDEO,
-            label: `${source === 'screen' ? 'Screen' : 'Camera'} ${new Date().toLocaleTimeString()}`,
-            videoUrl,
-            thumbnailUrl: `https://picsum.photos/seed/${subId}/200/120`,
-            duration: finalDuration,
-            sourceStart: 0,
-            timelinePosition: { start: recordingStartTime, end: recordingStartTime + finalDuration },
-            blobId: `blob_${subId}`,
-          });
-        }
-      }
-
-      // Add the placeholder clip to the parent track
-      newClips.push({
-        id: placeholderId,
-        trackId: targetTrack.id,
-        type: targetTrack.type,
-        label: `Group: ${new Date().toLocaleTimeString()}`,
-        duration: finalDuration,
-        sourceStart: 0,
-        timelinePosition: { start: recordingStartTime, end: recordingStartTime + finalDuration },
-        isPlaceholder: true,
-        childClipIds: childIds,
-      });
-    } else {
-      newClips.push({
-        id: baseId,
-        trackId: selectedTrackId,
-        type: targetTrack.type,
-        label: isImage ? `Photo ${new Date().toLocaleTimeString()}` : `Recording ${new Date().toLocaleTimeString()}`,
-        videoUrl: isImage ? undefined : videoUrl,
-        thumbnailUrl: isImage ? videoUrl : `https://picsum.photos/seed/${baseId}/200/120`,
-        duration: finalDuration,
-        sourceStart: 0,
-        timelinePosition: { start: recordingStartTime, end: recordingStartTime + finalDuration },
-        blobId: `blob_${baseId}`,
-      });
-    }
-
-    // If in insert or append mode, shift all subsequent clips forward on the same track
-    let updatedClips = [...clips];
-    if (recordingMode === 'insert' || recordingMode === 'append') {
-      const targetTrackIds = newClips.map(c => c.trackId);
-      updatedClips = updatedClips.map(clip => {
-        if (targetTrackIds.includes(clip.trackId) && clip.timelinePosition.start >= recordingStartTime) {
-          return {
-            ...clip,
-            timelinePosition: {
-              start: clip.timelinePosition.start + finalDuration,
-              end: clip.timelinePosition.end + finalDuration
-            }
-          };
-        }
-        return clip;
-      });
-    }
+      return {
+        ...clip,
+        duration: payload.duration,
+        blobId: !clip.isPlaceholder ? `blob_${clip.id}` : undefined,
+        overlayRect: source === 'camera' ? overlayRect : clip.overlayRect,
+        transform: source === 'camera' ? getRecordingTransform(overlayRect, cameraRecording) : clip.transform,
+      };
+    });
 
     // Save to IndexedDB (both metadata and blob)
     setIsLoading(true);
     setLoadingMessage('Saving recording...');
     try {
-      for (const clip of newClips) {
-        let clipBlob = blob;
-        if (multiRecordings) {
-          const rec = multiRecordings.find(r => r.url === clip.videoUrl);
-          if (rec) clipBlob = rec.blob;
-        }
+      for (const clip of finalClips.filter((entry) => draftClipIds.has(entry.id))) {
+        const template = sessionWithProgress.draftTemplates.find((entry) => entry.id === clip.id);
+        const clipBlob = template?.source ? recordingLookup[template.source]?.blob : undefined;
         await videoDB.saveClip(clip, clipBlob);
       }
       setStorageError(null);
@@ -672,16 +777,28 @@ export default function App() {
       setLoadingMessage('');
     }
 
-    // Apply resolveOverlaps to handle any remaining edge cases (like clips that spanned the insertion point)
-    let finalClips = [...updatedClips];
-    for (const clip of newClips) {
-      finalClips = resolveClipOverlaps(clip, [...finalClips, clip]);
-    }
-    pushToHistory(finalClips);
-    setSelectedClipIds(newClips.map(c => c.id));
+    setPast((prev) => [...prev, activeSession.originalClips]);
+    setIsPlaying(false);
+    setCurrentTime(sessionWithProgress.startTime + sessionWithProgress.duration);
+    setClips(finalClips);
+    setFuture([]);
+    setSelectedClipIds(sessionWithProgress.draftTemplates.map((template) => template.id));
+    setRecordingSession(null);
   };
 
+  useEffect(() => {
+    const activeSession = recordingSessionRef.current;
+    if (!activeSession || activeSession.isPaused || !activeSession.isActive) return;
+    const visibleDuration = Math.max(activeSession.duration, currentTime - activeSession.startTime, 0);
+    setClips((prev) => {
+      const next = buildRealtimeRecordingClipsAtDuration(activeSession, visibleDuration);
+      if (JSON.stringify(prev) === JSON.stringify(next)) return prev;
+      return next;
+    });
+  }, [currentTime]);
+
   const handleClipsUpdate = (updates: { id: number; newStart: number; newTrackId?: string }[]) => {
+    if (isRecordingLocked) return;
     // Check if any of the clips are on locked tracks
     const isAnyClipLocked = updates.some(u => {
       const clip = clips.find(c => c.id === u.id);
@@ -746,12 +863,14 @@ export default function App() {
   };
 
   const handleAddTrack = (type: TrackType) => {
+    if (isRecordingLocked) return;
     const newTracks = createTrackBundle(type, tracks);
     setTracks([...tracks, ...newTracks]);
     setSelectedTrackId(newTracks[0].id);
   };
 
   const handleDeleteTrack = (trackId: string) => {
+    if (isRecordingLocked) return;
     const nextState = deleteTrackBundle(tracks, clips, trackId, selectedTrackId);
     setTracks(nextState.tracks);
     setClips(nextState.clips);
@@ -759,6 +878,7 @@ export default function App() {
   };
 
   const handleDuplicateTrack = (trackId: string) => {
+    if (isRecordingLocked) return;
     const trackToDup = tracks.find(t => t.id === trackId);
     if (!trackToDup) return;
 
@@ -802,6 +922,7 @@ export default function App() {
   };
 
   const handleUpdateTrack = (trackId: string, updates: Partial<Track>) => {
+    if (isRecordingLocked) return;
     setTracks(tracks.map(t => t.id === trackId ? { ...t, ...updates } : t));
   };
 
@@ -851,6 +972,7 @@ export default function App() {
   };
 
   const handleAddTextClip = async (type: TrackType.TEXT | TrackType.SUBTITLE, startTimeOverride?: number, trackIdOverride?: string) => {
+    if (isRecordingLocked) return;
     const finalTrackId = trackIdOverride || selectedTrackId;
     const targetTrack = tracks.find(t => t.id === finalTrackId && t.type === type);
     if (!targetTrack) {
@@ -915,6 +1037,7 @@ export default function App() {
   };
 
   const handleClipTrim = (clipId: number, side: 'left' | 'right', newTime: number) => {
+    if (isRecordingLocked) return;
     const clipToTrim = clips.find(c => c.id === clipId);
     if (clipToTrim && isTrackLocked(clipToTrim.trackId)) return;
 
@@ -922,6 +1045,7 @@ export default function App() {
   };
 
   const handleSplit = () => {
+    if (isRecordingLocked) return;
     const clipToSplit = clips.find(
       (c) => currentTime > c.timelinePosition.start && currentTime < c.timelinePosition.end
     );
@@ -940,6 +1064,7 @@ export default function App() {
   };
 
   const handleDelete = () => {
+    if (isRecordingLocked) return;
     const unlockedSelection = selectedClipIds.filter((id) => {
       const clip = clips.find((entry) => entry.id === id);
       return clip ? !isTrackLocked(clip.trackId) : false;
@@ -957,6 +1082,7 @@ export default function App() {
   };
 
   const handleRippleDelete = () => {
+    if (isRecordingLocked) return;
     const unlockedSelection = selectedClipIds.filter((id) => {
       const clip = clips.find((entry) => entry.id === id);
       return clip ? !isTrackLocked(clip.trackId) : false;
@@ -974,6 +1100,7 @@ export default function App() {
   };
 
   const handleClipRename = (clipId: number, newLabel: string) => {
+    if (isRecordingLocked) return;
     const clip = clips.find(c => c.id === clipId);
     if (clip && isTrackLocked(clip.trackId)) return;
     const newState = clips.map(c => c.id === clipId ? { ...c, label: newLabel } : c);
@@ -981,6 +1108,7 @@ export default function App() {
   };
 
   const handleClipContentUpdate = (clipId: number, newContent: string) => {
+    if (isRecordingLocked) return;
     const clip = clips.find(c => c.id === clipId);
     if (clip && isTrackLocked(clip.trackId)) return;
     const newState = clips.map(c => c.id === clipId ? { ...c, content: newContent } : c);
@@ -988,6 +1116,7 @@ export default function App() {
   };
 
   const handleClipUpdate = (clipId: number, updates: Partial<VideoClip>, isLive: boolean = false) => {
+    if (isRecordingLocked && !isLive) return;
     const clip = clips.find(c => c.id === clipId);
     if (clip && isTrackLocked(clip.trackId)) return;
     
@@ -1049,10 +1178,12 @@ export default function App() {
   };
 
   const handleMoveTrack = (id: string, direction: 'up' | 'down') => {
+    if (isRecordingLocked) return;
     setTracks(moveTrack(tracks, id, direction));
   };
 
   const handleReorderTracks = (newTracks: Track[]) => {
+    if (isRecordingLocked) return;
     const orderedTracks = newTracks.map((track, i) => ({
       ...track,
       order: i
@@ -1159,6 +1290,10 @@ export default function App() {
 
       // Don't trigger shortcuts if user is typing in an input
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) {
+        return;
+      }
+
+      if (isRecordingLocked) {
         return;
       }
 
@@ -1292,6 +1427,7 @@ export default function App() {
     currentTime,
     recordingMode,
     selectedClipIds,
+    isRecordingLocked,
     isPlaying,
     totalDuration,
     togglePlay,
@@ -1550,26 +1686,9 @@ export default function App() {
 
           style={{ height: `${((window.innerHeight ?? 0) - timelineHeight)}px` }}
         >
-          {/* Left Side: Recorder or Info Card */}
+          {/* Left Side: Recorder / Track Actions */}
           <div className="h-full w-full max-h-[300px] min-h-0 flex justify-end slide-in-from-left duration-500">
-            {selectedClipIds.length === 1 ? (
-              <div className="w-full h-full flex justify-center overflow-y-auto">
-                <div className="w-full h-full flex flex-col items-center justify-center bg-[#111] rounded-xl border border-white/5">
-                  <div className="p-6 bg-white/5 rounded-2xl border border-white/10 mb-4">
-                    {(() => {
-                      const clip = clips.find(c => c.id === selectedClipIds[0]);
-                      if (clip?.type === TrackType.VIDEO) return <Video size={24} className="text-blue-500/50" />;
-                      if (clip?.type === TrackType.AUDIO) return <Music size={24} className="text-emerald-500/50" />;
-                      if (clip?.type === TrackType.TEXT || clip?.type === TrackType.SUBTITLE) return <TypeIcon size={24} className="text-blue-400/50" />;
-                      return <ImageIcon size={24} className="text-amber-500/50" />;
-                    })()}
-                  </div>
-                  <h3 className="text-lg font-bold text-white mb-1">{clips.find(c => c.id === selectedClipIds[0])?.label}</h3>
-                  <p className="text-gray-500 text-xs uppercase tracking-widest font-bold">{clips.find(c => c.id === selectedClipIds[0])?.type} Clip Selected</p>
-                </div>
-              </div>
-            ) : (
-              <div className="w-fit h-full  overflow-hidden">
+            <div className="w-fit h-full overflow-hidden">
                 {(() => {
                   const targetTrack = tracks.find(t => t.id === selectedTrackId);
                   if (!targetTrack) return null;
@@ -1579,6 +1698,10 @@ export default function App() {
                       <Recorder
                         onRecordingComplete={handleRecordingComplete}
                         onStartRecording={handleStartRecording}
+                        onStopRecording={handleRecordingStop}
+                        onRecordingProgress={handleRecordingProgress}
+                        onRecordingPause={handleRecordingPause}
+                        onRecordingResume={handleRecordingResume}
                         isActive={true}
                         isArmed={true}
                         trackType={targetTrack.type}
@@ -1599,6 +1722,10 @@ export default function App() {
                       <AudioRecorder
                         onRecordingComplete={handleRecordingComplete}
                         onStartRecording={handleStartRecording}
+                        onStopRecording={handleRecordingStop}
+                        onRecordingProgress={handleRecordingProgress}
+                        onRecordingPause={handleRecordingPause}
+                        onRecordingResume={handleRecordingResume}
                         isActive={true}
                         isArmed={true}
                       />
@@ -1618,6 +1745,10 @@ export default function App() {
                       <Recorder
                         onRecordingComplete={handleRecordingComplete}
                         onStartRecording={handleStartRecording}
+                        onStopRecording={handleRecordingStop}
+                        onRecordingProgress={handleRecordingProgress}
+                        onRecordingPause={handleRecordingPause}
+                        onRecordingResume={handleRecordingResume}
                         isActive={true}
                         isArmed={true}
                         trackType={targetTrack.type}
@@ -1647,8 +1778,7 @@ export default function App() {
 
                   return null;
                 })()}
-              </div>
-            )}
+            </div>
           </div>
 
           {/* Right Side: Video Preview Area & Properties */}
@@ -1660,6 +1790,8 @@ export default function App() {
                   tracks={tracks}
                   currentTime={currentTime}
                   isPlaying={isPlaying}
+                  isRecordingActive={!!recordingSession?.isActive}
+                  recordingSession={recordingSession}
                   showLutPreview={showLutPreview}
                 />
               </div>
@@ -1690,6 +1822,7 @@ export default function App() {
             clips={clips}
             tracks={tracks}
             selectedTrackId={selectedTrackId}
+            isInteractionLocked={isRecordingLocked}
             onTrackSelect={setSelectedTrackId}
             onTrackUpdate={handleUpdateTrack}
             onTrackDelete={handleDeleteTrack}
@@ -1701,6 +1834,7 @@ export default function App() {
             onAddTextClip={handleAddTextClip}
             currentTime={currentTime}
             onTimeChange={(time) => {
+              if (isRecordingLocked) return;
               const clampedTime = Math.max(0, time);
               setCurrentTime(clampedTime);
               if (isPlaying) setIsPlaying(false);
@@ -1717,7 +1851,10 @@ export default function App() {
             onDelete={handleDelete}
             onRippleDelete={handleRippleDelete}
             selectedClipIds={selectedClipIds}
-            onSelectionChange={setSelectedClipIds}
+            onSelectionChange={(ids) => {
+              if (isRecordingLocked) return;
+              setSelectedClipIds(ids);
+            }}
             downloadedClipIds={downloadedClipIds}
             totalDuration={totalDuration}
             exportRange={exportRange}

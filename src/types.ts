@@ -42,6 +42,8 @@ export interface VideoClip {
   overlayRect?: { x: number; y: number; width: number; height: number };
   isPlaceholder?: boolean;
   childClipIds?: number[];
+  isRecording?: boolean;
+  recordingSessionId?: string;
   style?: {
     fontSize?: number;
     fontWeight?: string | number;
@@ -84,3 +86,68 @@ export type VideoObjType = VideoClip[];
 
 export type RecordingMode = 'insert' | 'append';
 export type RecordingSource = 'camera' | 'screen' | 'overlay';
+
+export interface RecordingOverlayRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface RecordingMediaSnapshot {
+  source: RecordingSource;
+  url: string;
+  blob: Blob;
+  width?: number;
+  height?: number;
+}
+
+export interface RecordingLiveSource {
+  source: RecordingSource;
+  stream: MediaStream;
+}
+
+export interface RecordingStartPayload {
+  source: RecordingSource;
+  overlayRect?: RecordingOverlayRect;
+  liveSources?: RecordingLiveSource[];
+}
+
+export interface RecordingProgressPayload {
+  duration: number;
+  source: RecordingSource;
+  overlayRect?: RecordingOverlayRect;
+  recordings: RecordingMediaSnapshot[];
+  liveSources?: RecordingLiveSource[];
+}
+
+export interface RecordingCompletePayload extends RecordingProgressPayload {}
+
+export interface DraftClipTemplate {
+  id: number;
+  trackId: string;
+  type: TrackType;
+  label: string;
+  source?: RecordingSource;
+  duration: number;
+  sourceStart: number;
+  thumbnailUrl?: string;
+  overlayRect?: RecordingOverlayRect;
+  isPlaceholder?: boolean;
+  childClipIds?: number[];
+}
+
+export interface RecordingSession {
+  id: string;
+  startTime: number;
+  duration: number;
+  isActive: boolean;
+  isPaused: boolean;
+  source: RecordingSource;
+  overlayRect?: RecordingOverlayRect;
+  affectedTrackIds: string[];
+  draftTemplates: DraftClipTemplate[];
+  originalClips: VideoObjType;
+  partialRecordings: Partial<Record<RecordingSource, RecordingMediaSnapshot>>;
+  liveSources: Partial<Record<RecordingSource, RecordingLiveSource>>;
+}
