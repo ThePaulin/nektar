@@ -84,3 +84,64 @@ export type VideoObjType = VideoClip[];
 
 export type RecordingMode = 'insert' | 'append';
 export type RecordingSource = 'camera' | 'screen' | 'overlay';
+
+export type DesktopExportMode = 'browser' | 'desktop-ffmpeg';
+
+export interface DesktopExportRange {
+  start: number;
+  end: number;
+}
+
+export interface DesktopExportAsset {
+  assetId: string;
+  kind: 'video' | 'audio' | 'image';
+  sourceUrl?: string;
+  originalName: string;
+  mimeType?: string;
+  buffer?: ArrayBuffer;
+}
+
+export interface DesktopExportClipAssetRef {
+  assetId: string;
+}
+
+export interface DesktopExportClip {
+  id: number;
+  trackId: string;
+  label: string;
+  type: TrackType;
+  duration: number;
+  sourceStart: number;
+  timelinePosition: TimelinePosition;
+  volume: number;
+  content?: string;
+  style?: VideoClip['style'];
+  transform?: VideoClip['transform'];
+  assetRef?: DesktopExportClipAssetRef;
+}
+
+export interface DesktopExportRequest {
+  format: 'mp4' | 'webm';
+  width: number;
+  height: number;
+  fps: number;
+  range: DesktopExportRange;
+  clips: DesktopExportClip[];
+  tracks: Track[];
+  assets: DesktopExportAsset[];
+}
+
+export interface DesktopExportProgress {
+  jobId: string;
+  progress: number;
+  stage: 'materialize' | 'download' | 'ffmpeg' | 'finalize' | 'completed' | 'error';
+  message?: string;
+}
+
+export interface DesktopExportResult {
+  jobId: string;
+  outputPath: string;
+  outputFileName: string;
+  workspaceDir: string;
+  format: 'mp4' | 'webm';
+}

@@ -3,10 +3,16 @@
 ._*
 
 node_modules/
+.npm-cache/
 build/
 dist/
+release/
 coverage/
 .DS_Store
 *.log
 .env*
 !.env.example
+resources/ffmpeg/darwin-arm64/
+resources/ffmpeg/darwin-x64/
+resources/ffmpeg/linux-x64/
+resources/ffmpeg/win32-x64/
