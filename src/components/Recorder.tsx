@@ -1,18 +1,22 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { Camera, Square, Circle, X, Monitor, Layers, ChevronLeft, ChevronRight, ChevronUp, ChevronDown } from 'lucide-react';
 
-import { TrackType, RecordingSource } from '../types';
+import {
+  RecordingCompletePayload,
+  RecordingOverlayRect,
+  RecordingProgressPayload,
+  RecordingSource,
+  RecordingStartPayload,
+  TrackType,
+} from '../types';
 
 interface RecorderProps {
-  onRecordingComplete: (
-    videoUrl: string, 
-    duration: number, 
-    blob: Blob, 
-    overlayRect?: { x: number; y: number; width: number; height: number }, 
-    source?: RecordingSource,
-    multiRecordings?: { source: RecordingSource, url: string, blob: Blob, width?: number, height?: number }[]
-  ) => void;
-  onStartRecording?: () => void;
+  onRecordingComplete: (payload: RecordingCompletePayload) => void;
+  onStartRecording?: (payload: RecordingStartPayload) => void;
+  onStopRecording?: () => void;
+  onRecordingProgress?: (payload: RecordingProgressPayload) => void;
+  onRecordingPause?: () => void;
+  onRecordingResume?: () => void;
   onClose?: () => void;
   isActive?: boolean;
   isArmed?: boolean;
@@ -23,7 +27,18 @@ type OverlayX = 'left' | 'right';
 type OverlayY = 'top' | 'center' | 'bottom';
 type ScreenAccessStatus = 'not-determined' | 'granted' | 'denied' | 'restricted' | 'unknown';
 
-export const Recorder: React.FC<RecorderProps> = ({ onRecordingComplete, onStartRecording, onClose, isActive = true, isArmed = true, trackType }) => {
+export const Recorder: React.FC<RecorderProps> = ({
+  onRecordingComplete,
+  onStartRecording,
+  onStopRecording,
+  onRecordingProgress,
+  onRecordingPause,
+  onRecordingResume,
+  onClose,
+  isActive = true,
+  isArmed = true,
+  trackType,
+}) => {
   const [isRecording, setIsRecording] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
   const [cameraStream, setCameraStream] = useState<MediaStream | null>(null);
@@ -44,6 +59,8 @@ export const Recorder: React.FC<RecorderProps> = ({ onRecordingComplete, onStart
   const animationFrameRef = useRef<number | null>(null);
   const compositionFrameRef = useRef<number | null>(null);
   const workerRef = useRef<Worker | null>(null);
+  const partialUrlsRef = useRef<Partial<Record<RecordingSource, string>>>({});
+  const livePreviewStreamsRef = useRef<Partial<Record<RecordingSource, MediaStream>>>({});
   const [audioLevel, setAudioLevel] = useState(0);
   const [screenAccessStatus, setScreenAccessStatus] = useState<ScreenAccessStatus>('unknown');
   const [screenError, setScreenError] = useState<string | null>(null);
@@ -51,11 +68,26 @@ export const Recorder: React.FC<RecorderProps> = ({ onRecordingComplete, onStart
 
   const onRecordingCompleteRef = useRef(onRecordingComplete);
   const onStartRecordingRef = useRef(onStartRecording);
+  const onStopRecordingRef = useRef(onStopRecording);
+  const onRecordingProgressRef = useRef(onRecordingProgress);
+  const onRecordingPauseRef = useRef(onRecordingPause);
+  const onRecordingResumeRef = useRef(onRecordingResume);
 
   useEffect(() => {
     onRecordingCompleteRef.current = onRecordingComplete;
     onStartRecordingRef.current = onStartRecording;
-  }, [onRecordingComplete, onStartRecording]);
+    onStopRecordingRef.current = onStopRecording;
+    onRecordingProgressRef.current = onRecordingProgress;
+    onRecordingPauseRef.current = onRecordingPause;
+    onRecordingResumeRef.current = onRecordingResume;
+  }, [onRecordingComplete, onStartRecording, onStopRecording, onRecordingProgress, onRecordingPause, onRecordingResume]);
+
+  const revokePartialUrls = useCallback(() => {
+    (Object.values(partialUrlsRef.current) as Array<string | undefined>).forEach((url) => {
+      if (url) URL.revokeObjectURL(url);
+    });
+    partialUrlsRef.current = {};
+  }, []);
 
   const stopStreams = useCallback(() => {
     if (cameraStream) {
@@ -216,9 +248,82 @@ export const Recorder: React.FC<RecorderProps> = ({ onRecordingComplete, onStart
         workerRef.current.postMessage({ action: 'stop' });
         workerRef.current.terminate();
       }
+      revokePartialUrls();
       URL.revokeObjectURL(workerUrl);
     };
-  }, []);
+  }, [revokePartialUrls, stopStreams]);
+
+  const getOverlayRect = useCallback((): RecordingOverlayRect | undefined => {
+    if (recordingSource !== 'overlay') return undefined;
+
+    const width = 1920;
+    const height = 1080;
+    const overlaySize = 400;
+    let x = 0;
+    let y = 0;
+
+    if (overlayX === 'left') x = 50;
+    else x = width - overlaySize - 50;
+
+    if (overlayY === 'top') y = 50;
+    else if (overlayY === 'center') y = (height - overlaySize) / 2;
+    else y = height - overlaySize - 50;
+
+    return { x, y, width: overlaySize, height: overlaySize };
+  }, [overlayX, overlayY, recordingSource]);
+
+  const getElapsedDuration = useCallback(() => {
+    if (isRecording) {
+      return accumulatedTimeRef.current + (Date.now() - startTimeRef.current) / 1000;
+    }
+    return accumulatedTimeRef.current;
+  }, [isRecording]);
+
+  const emitRecordingProgress = useCallback(
+    (activeSource: RecordingSource) => {
+      const recordings = recordersRef.current.map((entry) => {
+        const blob = new Blob(entry.chunks, { type: entry.recorder.mimeType || 'video/webm' });
+        const currentUrl = partialUrlsRef.current[entry.source];
+        if (currentUrl) URL.revokeObjectURL(currentUrl);
+        const url = URL.createObjectURL(blob);
+        partialUrlsRef.current[entry.source] = url;
+
+        let width;
+        let height;
+        if (entry.source === 'camera' && videoRef.current) {
+          width = videoRef.current.videoWidth;
+          height = videoRef.current.videoHeight;
+        } else if (entry.source === 'screen' && screenVideoRef.current) {
+          width = screenVideoRef.current.videoWidth;
+          height = screenVideoRef.current.videoHeight;
+        } else if (entry.source === 'overlay') {
+          width = 1920;
+          height = 1080;
+        }
+
+        return {
+          source: entry.source,
+          url,
+          blob,
+          width,
+          height,
+        };
+      });
+
+      onRecordingProgressRef.current?.({
+        duration: getElapsedDuration(),
+        source: activeSource,
+        overlayRect: getOverlayRect(),
+        recordings,
+        liveSources: [
+          ...(cameraStream ? [{ source: 'camera' as RecordingSource, stream: cameraStream }] : []),
+          ...(screenStream ? [{ source: 'screen' as RecordingSource, stream: screenStream }] : []),
+          ...(activeSource === 'overlay' && livePreviewStreamsRef.current.overlay ? [{ source: 'overlay' as RecordingSource, stream: livePreviewStreamsRef.current.overlay }] : []),
+        ],
+      });
+    },
+    [cameraStream, getElapsedDuration, getOverlayRect, screenStream],
+  );
 
   useEffect(() => {
     refreshScreenAccessStatus();
@@ -264,13 +369,16 @@ export const Recorder: React.FC<RecorderProps> = ({ onRecordingComplete, onStart
     canvas.toBlob((blob) => {
       if (blob) {
         const url = URL.createObjectURL(blob);
-        onRecordingCompleteRef.current(url, 5, blob, undefined, recordingSource);
+        onRecordingCompleteRef.current({
+          duration: 5,
+          source: recordingSource,
+          recordings: [{ source: recordingSource, url, blob, width, height }],
+        });
       }
     }, 'image/png');
   };
 
   const startRecording = () => {
-    if (onStartRecordingRef.current) onStartRecordingRef.current();
     if (trackType === TrackType.IMAGE) {
       takePhoto();
       return;
@@ -279,8 +387,10 @@ export const Recorder: React.FC<RecorderProps> = ({ onRecordingComplete, onStart
 
     if (recordingSource === 'camera') {
       streamToRecord = cameraStream;
+      if (cameraStream) livePreviewStreamsRef.current.camera = cameraStream;
     } else if (recordingSource === 'screen') {
       streamToRecord = screenStream;
+      if (screenStream) livePreviewStreamsRef.current.screen = screenStream;
     } else if (recordingSource === 'overlay') {
       if (!canvasRef.current || !videoRef.current || !screenVideoRef.current) return;
       
@@ -399,6 +509,7 @@ export const Recorder: React.FC<RecorderProps> = ({ onRecordingComplete, onStart
       }
       
       streamToRecord = canvasStream;
+      livePreviewStreamsRef.current.overlay = canvasStream;
     }
 
     const startStreamRecorder = (stream: MediaStream, source: RecordingSource) => {
@@ -414,13 +525,17 @@ export const Recorder: React.FC<RecorderProps> = ({ onRecordingComplete, onStart
       const chunks: Blob[] = [];
 
       recorder.ondataavailable = (e) => {
-        if (e.data.size > 0) chunks.push(e.data);
+        if (e.data.size > 0) {
+          chunks.push(e.data);
+          emitRecordingProgress(recordingSource);
+        }
       };
 
       recordersRef.current.push({ source, recorder, chunks });
-      recorder.start();
+      recorder.start(500);
     };
 
+    revokePartialUrls();
     recordersRef.current = [];
     if (recordingSource === 'overlay') {
       if (cameraStream) startStreamRecorder(cameraStream, 'camera');
@@ -458,33 +573,13 @@ export const Recorder: React.FC<RecorderProps> = ({ onRecordingComplete, onStart
             };
           });
 
-          const main = recordings.find(r => r.source === 'overlay') || recordings[0];
-
-          let overlayRect;
-          if (recordingSource === 'overlay') {
-            const width = 1920;
-            const height = 1080;
-            const overlaySize = 400;
-            let x = 0;
-            let y = 0;
-
-            if (overlayX === 'left') x = 50;
-            else x = width - overlaySize - 50;
-
-            if (overlayY === 'top') y = 50;
-            else if (overlayY === 'center') y = (height - overlaySize) / 2;
-            else y = height - overlaySize - 50;
-
-            overlayRect = { x, y, width: overlaySize, height: overlaySize };
-          }
-
           onRecordingCompleteRef.current(
-            main.url,
-            accumulatedTimeRef.current,
-            main.blob,
-            overlayRect,
-            recordingSource,
-            recordings
+            {
+              duration: accumulatedTimeRef.current,
+              source: recordingSource,
+              overlayRect: getOverlayRect(),
+              recordings,
+            }
           );
           if (compositionFrameRef.current) cancelAnimationFrame(compositionFrameRef.current);
           if (workerRef.current) workerRef.current.postMessage({ action: 'stop' });
@@ -497,6 +592,15 @@ export const Recorder: React.FC<RecorderProps> = ({ onRecordingComplete, onStart
     setRecordingTime(0);
     accumulatedTimeRef.current = 0;
     startTimeRef.current = Date.now();
+    onStartRecordingRef.current?.({
+      source: recordingSource,
+      overlayRect: getOverlayRect(),
+      liveSources: [
+        ...(cameraStream ? [{ source: 'camera' as RecordingSource, stream: cameraStream }] : []),
+        ...(screenStream ? [{ source: 'screen' as RecordingSource, stream: screenStream }] : []),
+        ...(recordingSource === 'overlay' && streamToRecord ? [{ source: 'overlay' as RecordingSource, stream: streamToRecord }] : []),
+      ],
+    });
 
     timerRef.current = window.setInterval(() => {
       const elapsed = (Date.now() - startTimeRef.current) / 1000;
@@ -509,6 +613,7 @@ export const Recorder: React.FC<RecorderProps> = ({ onRecordingComplete, onStart
       if (isRecording) {
         accumulatedTimeRef.current += (Date.now() - startTimeRef.current) / 1000;
       }
+      onStopRecordingRef.current?.();
       recordersRef.current.forEach(r => r.recorder.stop());
       setIsRecording(false);
       setIsPaused(false);
@@ -523,6 +628,7 @@ export const Recorder: React.FC<RecorderProps> = ({ onRecordingComplete, onStart
       setIsPaused(true);
       setIsRecording(false);
       if (timerRef.current) clearInterval(timerRef.current);
+      onRecordingPauseRef.current?.();
     }
   };
 
@@ -532,6 +638,7 @@ export const Recorder: React.FC<RecorderProps> = ({ onRecordingComplete, onStart
       setIsPaused(false);
       setIsRecording(true);
       startTimeRef.current = Date.now();
+      onRecordingResumeRef.current?.();
 
       timerRef.current = window.setInterval(() => {
         const elapsed = (Date.now() - startTimeRef.current) / 1000;

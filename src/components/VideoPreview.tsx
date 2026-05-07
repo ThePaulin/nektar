@@ -1,5 +1,5 @@
 import React, { useRef, useEffect, useMemo, useState, useCallback } from 'react';
-import { VideoObjType, VideoClip, Track, TrackType, LUTData } from '../types';
+import { VideoObjType, VideoClip, Track, TrackType, LUTData, RecordingSession, RecordingSource } from '../types';
 import { WebGLLUT } from '../lib/webgl-lut';
 import { WebGPURenderer } from '../lib/renderer-webgpu';
 import { buildTextRenderMetrics, resolveClipTransformForRender } from '../lib/export-shared';
@@ -9,6 +9,8 @@ interface VideoPreviewProps {
   tracks: Track[];
   currentTime: number;
   isPlaying: boolean;
+  isRecordingActive: boolean;
+  recordingSession: RecordingSession | null;
   showLutPreview?: boolean;
 }
 
@@ -21,11 +23,14 @@ export const VideoPreview: React.FC<VideoPreviewProps> = ({
   tracks, 
   currentTime, 
   isPlaying, 
+  isRecordingActive,
+  recordingSession,
   showLutPreview = true 
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const videoRefs = useRef<{ [key: string]: HTMLVideoElement | null }>({});
+  const liveVideoRefs = useRef<Partial<Record<RecordingSource, HTMLVideoElement | null>>>({});
   const imageRefs = useRef<{ [key: string]: HTMLImageElement | null }>({});
   const requestRef = useRef<number>(0);
   const webglLutRef = useRef<WebGLLUT | null>(null);
@@ -113,9 +118,14 @@ export const VideoPreview: React.FC<VideoPreviewProps> = ({
   }, []);
 
   // Get active clips for each visible track
+  const previewClips = useMemo(
+    () => (isRecordingActive && recordingSession ? recordingSession.originalClips : clips),
+    [clips, isRecordingActive, recordingSession],
+  );
+
   const activeClips = useMemo(() => {
     const visibleTrackIds = tracks.filter(t => t.isVisible).map(t => t.id);
-    return clips.filter(clip =>
+    return previewClips.filter(clip =>
       visibleTrackIds.includes(clip.trackId) &&
       currentTime >= clip.timelinePosition.start &&
       currentTime <= clip.timelinePosition.end
@@ -124,7 +134,7 @@ export const VideoPreview: React.FC<VideoPreviewProps> = ({
       const indexB = tracks.findIndex(t => t.id === b.trackId);
       return indexB - indexA; // Bottom tracks first for canvas drawing
     });
-  }, [clips, tracks, currentTime]);
+  }, [previewClips, tracks, currentTime]);
 
   // Main rendering loop
   const render = useCallback((force = false) => {
@@ -286,7 +296,7 @@ export const VideoPreview: React.FC<VideoPreviewProps> = ({
   }, [isRendererInitialized, isPlaying, render]);
 
   useEffect(() => {
-    clips.forEach((clip) => {
+    previewClips.forEach((clip) => {
       if (clip.type !== TrackType.VIDEO && clip.type !== TrackType.AUDIO && clip.type !== TrackType.SCREEN) return;
       
       const video = videoRefs.current[clip.id];
@@ -324,7 +334,7 @@ export const VideoPreview: React.FC<VideoPreviewProps> = ({
     if (!isPlaying) {
       render(true);
     }
-  }, [activeClips, currentTime, isPlaying, clips, tracks, render]);
+  }, [activeClips, currentTime, isPlaying, previewClips, tracks, render]);
 
   const renderRef = useRef(render);
   useEffect(() => {
@@ -352,11 +362,11 @@ export const VideoPreview: React.FC<VideoPreviewProps> = ({
   }, [isPlaying]);
 
   const pooledClips = useMemo(() => {
-    return clips.filter(clip => 
+    return previewClips.filter(clip => 
       currentTime >= clip.timelinePosition.start - BUFFER_WINDOW &&
       currentTime <= clip.timelinePosition.end + BUFFER_WINDOW
     );
-  }, [clips, currentTime]);
+  }, [previewClips, currentTime]);
 
   return (
     <div 

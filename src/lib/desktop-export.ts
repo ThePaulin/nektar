@@ -35,6 +35,68 @@ function inferOriginalName(clip: VideoClip) {
   return cleanSource.split('/').pop() || `clip-${clip.id}`;
 }
 
+function shouldInlineAssetSource(sourceUrl: string) {
+  return sourceUrl.startsWith('blob:') || sourceUrl.startsWith('data:');
+}
+
+async function readBlobLikeSourceWithXhr(sourceUrl: string, clip: VideoClip) {
+  return new Promise<Blob>((resolve, reject) => {
+    const request = new XMLHttpRequest();
+    request.open('GET', sourceUrl, true);
+    request.responseType = 'blob';
+
+    request.onload = () => {
+      if (request.status === 0 || (request.status >= 200 && request.status < 300)) {
+        resolve(request.response);
+        return;
+      }
+
+      reject(
+        new Error(
+          `Failed to read local media for "${clip.label}": ${request.status} ${request.statusText || 'XMLHttpRequest error'}`,
+        ),
+      );
+    };
+
+    request.onerror = () => {
+      reject(new Error(`Failed to read local media for "${clip.label}": XMLHttpRequest network error`));
+    };
+
+    request.onabort = () => {
+      reject(new Error(`Failed to read local media for "${clip.label}": XMLHttpRequest aborted`));
+    };
+
+    request.send();
+  });
+}
+
+async function readSourceUrlAsAssetData(sourceUrl: string, clip: VideoClip) {
+  try {
+    const response = await fetch(sourceUrl);
+    if (!response.ok) {
+      throw new Error(`Failed to read local media for "${clip.label}": ${response.status} ${response.statusText}`);
+    }
+
+    const blob = await response.blob();
+    return {
+      mimeType: blob.type || undefined,
+      buffer: await blob.arrayBuffer(),
+    };
+  } catch (error) {
+    if (!sourceUrl.startsWith('blob:')) {
+      throw error;
+    }
+
+    // Packaged Electron builds can fail to fetch blob:file:// URLs even when the
+    // underlying object URL is still valid, so retry via XHR before giving up.
+    const blob = await readBlobLikeSourceWithXhr(sourceUrl, clip);
+    return {
+      mimeType: blob.type || undefined,
+      buffer: await blob.arrayBuffer(),
+    };
+  }
+}
+
 async function buildDesktopAssets(clips: VideoClip[]): Promise<DesktopExportAsset[]> {
   const assets = new Map<string, DesktopExportAsset>();
 
@@ -48,7 +110,6 @@ async function buildDesktopAssets(clips: VideoClip[]): Promise<DesktopExportAsse
     const asset: DesktopExportAsset = {
       assetId,
       kind: getAssetKind(clip.type),
-      sourceUrl,
       originalName: inferOriginalName(clip),
     };
 
@@ -58,6 +119,16 @@ async function buildDesktopAssets(clips: VideoClip[]): Promise<DesktopExportAsse
         asset.mimeType = blob.type || undefined;
         asset.buffer = await blob.arrayBuffer();
       }
+    }
+
+    if (!asset.buffer && shouldInlineAssetSource(sourceUrl)) {
+      const localAsset = await readSourceUrlAsAssetData(sourceUrl, clip);
+      asset.mimeType = localAsset.mimeType;
+      asset.buffer = localAsset.buffer;
+    }
+
+    if (!asset.buffer) {
+      asset.sourceUrl = sourceUrl;
     }
 
     assets.set(assetId, asset);
