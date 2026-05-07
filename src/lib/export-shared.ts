@@ -1,5 +1,7 @@
 import { Track, TrackType, VideoClip } from '../types';
 
+export const COMPOSITION_REFERENCE_WIDTH = 1280;
+export const COMPOSITION_REFERENCE_HEIGHT = 720;
 export const EXPORT_WIDTH = 1920;
 export const EXPORT_HEIGHT = 1080;
 export const EXPORT_FPS = 30;
@@ -126,6 +128,81 @@ export interface ExportTimelinePlan {
   totalFrames: number;
   exportDuration: number;
   fps: number;
+}
+
+const DEFAULT_CLIP_TRANSFORM: NonNullable<VideoClip['transform']> = {
+  position: { x: 0, y: 0, z: 0 },
+  rotation: 0,
+  flipHorizontal: false,
+  flipVertical: false,
+  scale: { x: 1, y: 1 },
+  opacity: 1,
+  crop: { top: 0, right: 0, bottom: 0, left: 0 },
+};
+
+function normalizeRotation(rotation: VideoClip['transform'] extends infer T
+  ? T extends { rotation: infer R }
+    ? R
+    : number
+  : number) {
+  return typeof rotation === 'number' ? rotation : (rotation as any)?.z || 0;
+}
+
+export function resolveClipTransformForRender(
+  transform: VideoClip['transform'] | undefined,
+  targetWidth = COMPOSITION_REFERENCE_WIDTH,
+  targetHeight = COMPOSITION_REFERENCE_HEIGHT,
+): NonNullable<VideoClip['transform']> {
+  const resolved = {
+    ...DEFAULT_CLIP_TRANSFORM,
+    ...(transform || {}),
+  };
+
+  return {
+    ...resolved,
+    position: {
+      x: (resolved.position?.x || 0) * (targetWidth / COMPOSITION_REFERENCE_WIDTH),
+      y: (resolved.position?.y || 0) * (targetHeight / COMPOSITION_REFERENCE_HEIGHT),
+      z: resolved.position?.z || 0,
+    },
+    rotation: normalizeRotation(resolved.rotation),
+    scale: {
+      x: resolved.scale?.x || 1,
+      y: resolved.scale?.y || 1,
+    },
+    opacity: resolved.opacity ?? 1,
+    crop: {
+      ...DEFAULT_CLIP_TRANSFORM.crop,
+      ...(resolved.crop || {}),
+    },
+    flipHorizontal: !!resolved.flipHorizontal,
+    flipVertical: !!resolved.flipVertical,
+  };
+}
+
+export function buildTextRenderMetrics(
+  clip: VideoClip,
+  targetWidth = COMPOSITION_REFERENCE_WIDTH,
+  targetHeight = COMPOSITION_REFERENCE_HEIGHT,
+) {
+  const renderScale = targetWidth / COMPOSITION_REFERENCE_WIDTH;
+  const fontSize = (clip.style?.fontSize || 48) * renderScale;
+  const fontFamily = clip.style?.fontFamily || 'sans-serif';
+  const fontWeight = clip.style?.fontWeight || 'normal';
+  const fontStyle = clip.style?.fontStyle || 'normal';
+  const fontStretch = clip.style?.fontStretch ? `${clip.style.fontStretch} ` : '';
+
+  return {
+    font: `${fontStyle} ${fontWeight} ${fontStretch}${fontSize}px ${fontFamily}`.replace(/\s+/g, ' ').trim(),
+    fontSize,
+    fillStyle: clip.style?.color || '#ffffff',
+    backgroundColor: clip.style?.backgroundColor,
+    paddingX: 16 * renderScale,
+    paddingY: 8 * renderScale,
+    offsetY: clip.type === TrackType.SUBTITLE
+      ? (COMPOSITION_REFERENCE_HEIGHT / 2 - 80) * (targetHeight / COMPOSITION_REFERENCE_HEIGHT)
+      : 0,
+  };
 }
 
 function compareClips(left: VideoClip, right: VideoClip, trackOrderById: Map<string, number>) {

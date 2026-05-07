@@ -93,7 +93,7 @@ async function installAppMocks(page: import('@playwright/test').Page, options?: 
       Object.defineProperty(window.HTMLMediaElement.prototype, 'duration', { configurable: true, get: () => 10 });
 
       const originalCreateElement = document.createElement.bind(document);
-      document.createElement = function createElement(tagName, options) {
+      document.createElement = (function createElement(tagName: string, options?: ElementCreationOptions) {
         const element = originalCreateElement(tagName, options);
         if (tagName === 'video' || tagName === 'audio') {
           setTimeout(() => {
@@ -102,7 +102,7 @@ async function installAppMocks(page: import('@playwright/test').Page, options?: 
           }, 0);
         }
         return element;
-      };
+      }) as typeof document.createElement;
 
       HTMLCanvasElement.prototype.getContext = (function getContext(type: string) {
         if (type === '2d') {
