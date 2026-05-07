@@ -25,6 +25,7 @@ interface RecorderProps {
 
 type OverlayX = 'left' | 'right';
 type OverlayY = 'top' | 'center' | 'bottom';
+type ScreenAccessStatus = 'not-determined' | 'granted' | 'denied' | 'restricted' | 'unknown';
 
 export const Recorder: React.FC<RecorderProps> = ({
   onRecordingComplete,
@@ -61,6 +62,9 @@ export const Recorder: React.FC<RecorderProps> = ({
   const partialUrlsRef = useRef<Partial<Record<RecordingSource, string>>>({});
   const livePreviewStreamsRef = useRef<Partial<Record<RecordingSource, MediaStream>>>({});
   const [audioLevel, setAudioLevel] = useState(0);
+  const [screenAccessStatus, setScreenAccessStatus] = useState<ScreenAccessStatus>('unknown');
+  const [screenError, setScreenError] = useState<string | null>(null);
+  const isMacOS = /mac/i.test(navigator.userAgent);
 
   const onRecordingCompleteRef = useRef(onRecordingComplete);
   const onStartRecordingRef = useRef(onStartRecording);
@@ -95,6 +99,22 @@ export const Recorder: React.FC<RecorderProps> = ({
       setScreenStream(null);
     }
   }, [cameraStream, screenStream]);
+
+  const refreshScreenAccessStatus = useCallback(async () => {
+    const desktopSystem = window.nektarDesktop?.desktopSystem;
+    if (!desktopSystem?.getScreenAccessStatus) {
+      return 'unknown' as ScreenAccessStatus;
+    }
+
+    try {
+      const status = await desktopSystem.getScreenAccessStatus();
+      setScreenAccessStatus(status);
+      return status;
+    } catch (err) {
+      console.error("Error checking screen access status:", err);
+      return 'unknown' as ScreenAccessStatus;
+    }
+  }, []);
 
   const setupCamera = async () => {
     try {
@@ -137,18 +157,43 @@ export const Recorder: React.FC<RecorderProps> = ({
 
   const setupScreen = async () => {
     try {
-      const constraints: any = {
+      const desktopSystem = window.nektarDesktop?.desktopSystem;
+      const status = await refreshScreenAccessStatus();
+      setScreenError(null);
+
+      if ((status === 'denied' || status === 'restricted') && desktopSystem?.openScreenRecordingSettings) {
+        await desktopSystem.openScreenRecordingSettings();
+        return;
+      }
+
+      const constraints: DisplayMediaStreamOptions = {
         video: { 
           cursor: "always",
           displaySurface: "browser"
         },
-        audio: {
+        audio: isMacOS ? false : {
           echoCancellation: true,
           noiseSuppression: true,
           autoGainControl: true
         }
       };
-      const stream = await navigator.mediaDevices.getDisplayMedia(constraints);
+      let stream: MediaStream;
+
+      try {
+        stream = await navigator.mediaDevices.getDisplayMedia(constraints);
+      } catch (err) {
+        if (!isMacOS || constraints.audio === false) {
+          throw err;
+        }
+
+        // macOS frequently rejects display capture when audio is requested.
+        stream = await navigator.mediaDevices.getDisplayMedia({
+          ...constraints,
+          audio: false,
+        });
+      }
+
+      setScreenAccessStatus('granted');
       setScreenStream(stream);
       if (screenVideoRef.current) {
         screenVideoRef.current.srcObject = stream;
@@ -161,6 +206,9 @@ export const Recorder: React.FC<RecorderProps> = ({
       };
     } catch (err) {
       console.error("Error accessing screen:", err);
+      const message = err instanceof Error ? err.message : 'Unable to capture your screen.';
+      setScreenError(message);
+      await refreshScreenAccessStatus();
     }
   };
 
@@ -276,6 +324,17 @@ export const Recorder: React.FC<RecorderProps> = ({
     },
     [cameraStream, getElapsedDuration, getOverlayRect, screenStream],
   );
+
+  useEffect(() => {
+    refreshScreenAccessStatus();
+
+    const handleWindowFocus = () => {
+      void refreshScreenAccessStatus();
+    };
+
+    window.addEventListener('focus', handleWindowFocus);
+    return () => window.removeEventListener('focus', handleWindowFocus);
+  }, [refreshScreenAccessStatus]);
 
   const takePhoto = () => {
     if (!videoRef.current && !screenVideoRef.current && !canvasRef.current) return;
@@ -616,6 +675,25 @@ export const Recorder: React.FC<RecorderProps> = ({
     return `${mins}:${secs.toString().padStart(2, '0')}`;
   };
 
+  const needsScreenSettings =
+    (recordingSource === 'screen' || recordingSource === 'overlay') &&
+    (screenAccessStatus === 'denied' || screenAccessStatus === 'restricted');
+
+  const handleGrantAccess = async () => {
+    if (recordingSource === 'camera' || recordingSource === 'overlay') {
+      await setupCamera();
+    }
+
+    if (recordingSource === 'screen' || recordingSource === 'overlay') {
+      if (needsScreenSettings) {
+        await window.nektarDesktop?.desktopSystem?.openScreenRecordingSettings?.();
+        return;
+      }
+
+      await setupScreen();
+    }
+  };
+
   return (
     <div className="relative w-fit h-full max-h-[400px] flex flex-col bg-[#111] border border-white/10 shadow-2xl overflow-hidden rounded-xl min-h-0">
       {/* Video Preview */}
@@ -709,14 +787,23 @@ export const Recorder: React.FC<RecorderProps> = ({
             <p className="text-[10px] text-gray-400 max-w-[200px] mb-4">
               We need access to your {recordingSource === 'camera' ? 'camera' : recordingSource === 'screen' ? 'screen' : 'camera and screen'} to start recording.
             </p>
+            {needsScreenSettings && (
+              <p className="text-[10px] text-amber-300 max-w-[220px] mb-4">
+                Enable Screen Recording for Nektar in System Settings, then fully quit and reopen the app.
+              </p>
+            )}
+            {screenError && !needsScreenSettings && (
+              <p className="text-[10px] text-rose-300 max-w-[240px] mb-4">
+                {screenError}
+              </p>
+            )}
             <button
               onClick={() => {
-                if (recordingSource === 'camera' || recordingSource === 'overlay') setupCamera();
-                if (recordingSource === 'screen' || recordingSource === 'overlay') setupScreen();
+                void handleGrantAccess();
               }}
               className="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-xs font-bold transition-all shadow-lg shadow-blue-600/20"
             >
-              Grant Access
+              {needsScreenSettings ? 'Open Screen Settings' : 'Grant Access'}
             </button>
           </div>
         )}

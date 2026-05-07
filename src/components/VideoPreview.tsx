@@ -2,6 +2,7 @@ import React, { useRef, useEffect, useMemo, useState, useCallback } from 'react'
 import { VideoObjType, VideoClip, Track, TrackType, LUTData, RecordingSession, RecordingSource } from '../types';
 import { WebGLLUT } from '../lib/webgl-lut';
 import { WebGPURenderer } from '../lib/renderer-webgpu';
+import { buildTextRenderMetrics, resolveClipTransformForRender } from '../lib/export-shared';
 
 interface VideoPreviewProps {
   clips: VideoObjType;
@@ -164,20 +165,8 @@ export const VideoPreview: React.FC<VideoPreviewProps> = ({
       const track = tracks.find(t => t.id === clip.trackId);
       if (!track || !track.isVisible) return;
 
-      const transform = {
-        position: { x: 0, y: 0, z: 0 },
-        rotation: 0,
-        flipHorizontal: false,
-        flipVertical: false,
-        scale: { x: 1, y: 1 },
-        opacity: 1,
-        crop: { top: 0, right: 0, bottom: 0, left: 0 },
-        ...(clip.transform || {})
-      };
-      
-      const rotation = typeof transform.rotation === 'number' 
-        ? transform.rotation 
-        : (transform.rotation as any)?.z || 0;
+      const transform = resolveClipTransformForRender(clip.transform, PLAYBACK_WIDTH, PLAYBACK_HEIGHT);
+      const rotation = transform.rotation;
 
       oCtx.save();
       oCtx.translate(PLAYBACK_WIDTH / 2 + (transform.position.x || 0), PLAYBACK_HEIGHT / 2 + (transform.position.y || 0));
@@ -261,26 +250,27 @@ export const VideoPreview: React.FC<VideoPreviewProps> = ({
           oCtx.drawImage(img, sx, sy, sw, sh, -PLAYBACK_WIDTH/2, -PLAYBACK_HEIGHT/2, PLAYBACK_WIDTH, PLAYBACK_HEIGHT);
         }
       } else if (clip.type === TrackType.TEXT || clip.type === TrackType.SUBTITLE) {
-        const baseFontSize = clip.style?.fontSize || 48;
-        const playbackFontSize = baseFontSize * (PLAYBACK_WIDTH / 1280);
-        
-        oCtx.font = `${clip.style?.fontWeight || 'normal'} ${playbackFontSize}px ${clip.style?.fontFamily || 'sans-serif'}`;
-        oCtx.fillStyle = clip.style?.color || '#ffffff';
+        const textMetrics = buildTextRenderMetrics(clip, PLAYBACK_WIDTH, PLAYBACK_HEIGHT);
+
+        oCtx.font = textMetrics.font;
+        oCtx.fillStyle = textMetrics.fillStyle;
         oCtx.textAlign = 'center';
         oCtx.textBaseline = 'middle';
 
-        if (clip.type === TrackType.SUBTITLE || (clip.style?.backgroundColor && clip.style.backgroundColor !== 'transparent')) {
+        if (clip.type === TrackType.SUBTITLE || (textMetrics.backgroundColor && textMetrics.backgroundColor !== 'transparent')) {
           const textWidth = oCtx.measureText(clip.content || '').width;
-          oCtx.fillStyle = clip.style?.backgroundColor || 'rgba(0,0,0,0.6)';
-          const paddingX = 16 * (PLAYBACK_WIDTH / 1280);
-          const paddingY = 8 * (PLAYBACK_WIDTH / 1280);
+          oCtx.fillStyle = textMetrics.backgroundColor || 'rgba(0,0,0,0.6)';
           
-          oCtx.fillRect(-textWidth/2 - paddingX, -playbackFontSize/2 - paddingY, textWidth + paddingX*2, playbackFontSize + paddingY*2);
-          oCtx.fillStyle = clip.style?.color || '#ffffff';
+          oCtx.fillRect(
+            -textWidth / 2 - textMetrics.paddingX,
+            -textMetrics.fontSize / 2 - textMetrics.paddingY,
+            textWidth + textMetrics.paddingX * 2,
+            textMetrics.fontSize + textMetrics.paddingY * 2,
+          );
+          oCtx.fillStyle = textMetrics.fillStyle;
         }
-        
-        const offsetY = clip.type === TrackType.SUBTITLE ? (720/2 - 80) * (PLAYBACK_HEIGHT/720) : 0;
-        oCtx.fillText(clip.content || '', 0, offsetY);
+
+        oCtx.fillText(clip.content || '', 0, textMetrics.offsetY);
       }
 
       oCtx.restore();

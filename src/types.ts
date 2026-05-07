@@ -154,64 +154,63 @@ export interface RecordingSession {
 
 export type ExportProgressStage = 'prepare' | 'audio' | 'render' | 'finalize';
 
-export interface ExportOptions {
+export type DesktopExportMode = 'browser' | 'desktop-ffmpeg';
+
+export interface DesktopExportRange {
+  start: number;
+  end: number;
+}
+
+export interface DesktopExportAsset {
+  assetId: string;
+  kind: 'video' | 'audio' | 'image';
+  sourceUrl?: string;
+  originalName: string;
+  mimeType?: string;
+  buffer?: ArrayBuffer;
+}
+
+export interface DesktopExportClipAssetRef {
+  assetId: string;
+}
+
+export interface DesktopExportClip {
+  id: number;
+  trackId: string;
+  label: string;
+  type: TrackType;
+  duration: number;
+  sourceStart: number;
+  timelinePosition: TimelinePosition;
+  volume: number;
+  content?: string;
+  style?: VideoClip['style'];
+  transform?: VideoClip['transform'];
+  assetRef?: DesktopExportClipAssetRef;
+}
+
+export interface DesktopExportRequest {
   format: 'mp4' | 'webm';
   width: number;
   height: number;
   fps: number;
-  range: { start: number; end: number };
-  onProgress?: (progress: number, stage: ExportProgressStage) => void;
-  onCancel?: () => boolean;
+  range: DesktopExportRange;
+  clips: DesktopExportClip[];
+  tracks: Track[];
+  assets: DesktopExportAsset[];
 }
 
-export interface ExportResult {
-  blob: Blob;
-  format: ExportOptions['format'];
-  duration: number;
+export interface DesktopExportProgress {
+  jobId: string;
+  progress: number;
+  stage: 'materialize' | 'download' | 'ffmpeg' | 'finalize' | 'completed' | 'error';
+  message?: string;
 }
 
-export interface ExportAsset {
-  key: string;
-  kind: 'media' | 'image';
-  sourceUrl: string;
-  fetchUrl: string;
-  blobId?: string;
-  hasAudio: boolean;
-  width?: number;
-  height?: number;
-  duration?: number;
-}
-
-export interface ResolvedClipTransform {
-  position: { x: number; y: number; z: number };
-  rotation: number;
-  flipHorizontal: boolean;
-  flipVertical: boolean;
-  scale: { x: number; y: number };
-  opacity: number;
-  crop: { top: number; right: number; bottom: number; left: number };
-}
-
-export interface PreparedExportClip {
-  clip: VideoClip;
-  assetKey?: string;
-  timelineStart: number;
-  timelineEnd: number;
-  exportStart: number;
-  exportEnd: number;
-  sourceOffset: number;
-  volume: number;
-  isMuted: boolean;
-  trackOrder: number;
-  transform: ResolvedClipTransform;
-}
-
-export interface PreparedExportScene {
-  range: { start: number; end: number };
-  duration: number;
-  width: number;
-  height: number;
-  fps: number;
-  assets: ExportAsset[];
-  clips: PreparedExportClip[];
+export interface DesktopExportResult {
+  jobId: string;
+  outputPath: string;
+  outputFileName: string;
+  workspaceDir: string;
+  format: 'mp4' | 'webm';
 }

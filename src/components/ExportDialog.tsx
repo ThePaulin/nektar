@@ -1,10 +1,27 @@
-import React, { useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { motion } from 'motion/react';
 import { X, Download, Loader2, CheckCircle2, AlertCircle } from 'lucide-react';
 import { Muxer as WebMMuxer, ArrayBufferTarget as WebMArrayBufferTarget } from 'webm-muxer';
 import { Muxer as MP4Muxer, ArrayBufferTarget as MP4ArrayBufferTarget } from 'mp4-muxer';
-import { VideoObjType, Track, TrackType, VideoClip } from '../types';
-import { EXPORT_FPS, EXPORT_HEIGHT, EXPORT_SAMPLE_RATE, EXPORT_WIDTH } from '../lib/export-shared';
+import { DesktopExportMode, VideoObjType, Track, TrackType, VideoClip } from '../types';
+import {
+  buildTextRenderMetrics,
+  EXPORT_FPS,
+  EXPORT_HEIGHT,
+  EXPORT_SAMPLE_RATE,
+  EXPORT_WIDTH,
+  resolveClipTransformForRender,
+} from '../lib/export-shared';
+import {
+  buildDesktopExportRequest,
+  cancelDesktopExport,
+  copyDesktopExportResult,
+  getDesktopExportAvailability,
+  getDesktopExportResult,
+  onDesktopExportProgress,
+  pickDesktopExportSavePath,
+  startDesktopExport,
+} from '../lib/desktop-export';
 
 type ExportFormat = 'webm' | 'mp4';
 
@@ -20,6 +37,7 @@ interface ExportResult {
   buffer: ArrayBuffer;
   mimeType: string;
   fileExtension: string;
+  savedPath?: string;
 }
 
 interface EncoderChoice {
@@ -145,6 +163,9 @@ export const ExportDialog: React.FC<ExportDialogProps> = ({ clips, tracks, expor
   const [progress, setProgress] = useState(0);
   const [progressMessage, setProgressMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [completedMessage, setCompletedMessage] = useState<string | null>(null);
+  const [desktopExportAvailable, setDesktopExportAvailable] = useState(false);
+  const [exportMode, setExportMode] = useState<DesktopExportMode>('browser');
   const [format, setFormat] = useState<ExportFormat>(
     typeof MediaRecorder !== 'undefined' && (
       MediaRecorder.isTypeSupported('video/mp4') ||
@@ -155,6 +176,7 @@ export const ExportDialog: React.FC<ExportDialogProps> = ({ clips, tracks, expor
   const offscreenCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const videoElementsRef = useRef<Record<number, HTMLVideoElement>>({});
   const imageElementsRef = useRef<Record<number, HTMLImageElement>>({});
+  const desktopJobIdRef = useRef<string | null>(null);
 
   const cleanupLegacyAssets = () => {
     Object.values(videoElementsRef.current as Record<string, HTMLVideoElement>).forEach((video) => {
@@ -170,6 +192,23 @@ export const ExportDialog: React.FC<ExportDialogProps> = ({ clips, tracks, expor
     videoElementsRef.current = {};
     imageElementsRef.current = {};
   };
+
+  useEffect(() => {
+    let cancelled = false;
+
+    void getDesktopExportAvailability().then((available) => {
+      if (cancelled) return;
+
+      setDesktopExportAvailable(available);
+      if (available) {
+        setExportMode((currentMode) => (currentMode === 'browser' ? 'desktop-ffmpeg' : currentMode));
+      }
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const runWorkerExport = async (): Promise<ExportResult> => {
     let exportWorker: Worker | null = null;
@@ -479,22 +518,13 @@ export const ExportDialog: React.FC<ExportDialogProps> = ({ clips, tracks, expor
         offscreenCtx.fillRect(0, 0, EXPORT_WIDTH, EXPORT_HEIGHT);
 
         for (const clip of activeClips) {
-          const transform = {
-            position: { x: 0, y: 0, z: 0 },
-            rotation: 0,
-            flipHorizontal: false,
-            flipVertical: false,
-            scale: { x: 1, y: 1 },
-            opacity: 1,
-            crop: { top: 0, right: 0, bottom: 0, left: 0 },
-            ...(clip.transform || {}),
-          };
+          const transform = resolveClipTransformForRender(clip.transform, EXPORT_WIDTH, EXPORT_HEIGHT);
           const crop = transform.crop || { top: 0, right: 0, bottom: 0, left: 0 };
 
           offscreenCtx.save();
           offscreenCtx.globalAlpha = transform.opacity ?? 1;
           offscreenCtx.translate(EXPORT_WIDTH / 2 + (transform.position.x || 0), EXPORT_HEIGHT / 2 + (transform.position.y || 0));
-          offscreenCtx.rotate(((typeof transform.rotation === 'number' ? transform.rotation : 0) * Math.PI) / 180);
+          offscreenCtx.rotate((transform.rotation * Math.PI) / 180);
           offscreenCtx.scale(
             (transform.scale?.x || 1) * (transform.flipHorizontal ? -1 : 1),
             (transform.scale?.y || 1) * (transform.flipVertical ? -1 : 1)
@@ -519,26 +549,25 @@ export const ExportDialog: React.FC<ExportDialogProps> = ({ clips, tracks, expor
               offscreenCtx.drawImage(image, sx, sy, sw, sh, -EXPORT_WIDTH / 2, -EXPORT_HEIGHT / 2, EXPORT_WIDTH, EXPORT_HEIGHT);
             }
           } else if (clip.type === TrackType.TEXT || clip.type === TrackType.SUBTITLE) {
-            const fontSize = clip.style?.fontSize || 48;
-            const fontFamily = clip.style?.fontFamily || 'sans-serif';
-            const fontWeight = clip.style?.fontWeight || 'normal';
-            const fontStyle = clip.style?.fontStyle || 'normal';
-            const fontStretch = clip.style?.fontStretch ? `${clip.style.fontStretch} ` : '';
-
-            offscreenCtx.font = `${fontStyle} ${fontWeight} ${fontStretch}${fontSize}px ${fontFamily}`.replace(/\s+/g, ' ').trim();
-            offscreenCtx.fillStyle = clip.style?.color || '#ffffff';
+            const textMetrics = buildTextRenderMetrics(clip, EXPORT_WIDTH, EXPORT_HEIGHT);
+            offscreenCtx.font = textMetrics.font;
+            offscreenCtx.fillStyle = textMetrics.fillStyle;
             offscreenCtx.textAlign = 'center';
             offscreenCtx.textBaseline = 'middle';
 
-            if (clip.type === TrackType.SUBTITLE || (clip.style?.backgroundColor && clip.style.backgroundColor !== 'transparent')) {
+            if (clip.type === TrackType.SUBTITLE || (textMetrics.backgroundColor && textMetrics.backgroundColor !== 'transparent')) {
               const textWidth = offscreenCtx.measureText(clip.content || '').width;
-              offscreenCtx.fillStyle = clip.style?.backgroundColor || 'rgba(0,0,0,0.6)';
-              offscreenCtx.fillRect(-textWidth / 2 - 20, -fontSize / 2 - 10, textWidth + 40, fontSize + 20);
-              offscreenCtx.fillStyle = clip.style?.color || '#ffffff';
+              offscreenCtx.fillStyle = textMetrics.backgroundColor || 'rgba(0,0,0,0.6)';
+              offscreenCtx.fillRect(
+                -textWidth / 2 - textMetrics.paddingX,
+                -textMetrics.fontSize / 2 - textMetrics.paddingY,
+                textWidth + textMetrics.paddingX * 2,
+                textMetrics.fontSize + textMetrics.paddingY * 2,
+              );
+              offscreenCtx.fillStyle = textMetrics.fillStyle;
             }
 
-            const offsetY = clip.type === TrackType.SUBTITLE ? (EXPORT_HEIGHT / 2 - 80) : 0;
-            offscreenCtx.fillText(clip.content || '', 0, offsetY);
+            offscreenCtx.fillText(clip.content || '', 0, textMetrics.offsetY);
           }
 
           offscreenCtx.restore();
@@ -618,17 +647,60 @@ export const ExportDialog: React.FC<ExportDialogProps> = ({ clips, tracks, expor
     }
   };
 
+  const runDesktopExport = async (): Promise<ExportResult> => {
+    const unsubscribe = onDesktopExportProgress((nextProgress) => {
+      if (desktopJobIdRef.current && nextProgress.jobId !== desktopJobIdRef.current) return;
+      setProgress(Math.round(nextProgress.progress * 100));
+      setProgressMessage(nextProgress.message || null);
+    });
+
+    try {
+      const request = await buildDesktopExportRequest({
+        clips,
+        tracks,
+        exportRange,
+        format,
+      });
+      const jobId = await startDesktopExport(request);
+      desktopJobIdRef.current = jobId;
+
+      const result = await getDesktopExportResult(jobId);
+      const selectedPath = await pickDesktopExportSavePath(`sequence-export-${Date.now()}.${result.format}`);
+      if (!selectedPath) {
+        throw new Error('Export saving was canceled before the file was copied.');
+      }
+
+      setProgressMessage(`Saving to ${selectedPath}`);
+      await copyDesktopExportResult(jobId, selectedPath);
+      setProgress(100);
+      setProgressMessage(selectedPath);
+
+      return {
+        buffer: new ArrayBuffer(0),
+        mimeType: format === 'mp4' ? 'video/mp4' : 'video/webm',
+        fileExtension: result.format,
+        savedPath: selectedPath,
+      };
+    } finally {
+      unsubscribe();
+    }
+  };
+
   const startExport = async () => {
     setStatus('exporting');
     setProgress(0);
     setProgressMessage(null);
     setError(null);
+    setCompletedMessage(null);
+    desktopJobIdRef.current = null;
 
     let result: ExportResult | null = null;
     let workerError: unknown = null;
 
     try {
-      if (canUseNativeWorkerExport()) {
+      if (exportMode === 'desktop-ffmpeg' && desktopExportAvailable) {
+        result = await runDesktopExport();
+      } else if (canUseNativeWorkerExport()) {
         try {
           result = await runWorkerExport();
         } catch (primaryError) {
@@ -649,9 +721,12 @@ export const ExportDialog: React.FC<ExportDialogProps> = ({ clips, tracks, expor
         result = await runLegacyExport();
       }
 
-      downloadBlob(result.buffer, result.mimeType, `sequence-export-${Date.now()}.${result.fileExtension}`);
+      if (result.buffer.byteLength > 0) {
+        downloadBlob(result.buffer, result.mimeType, `sequence-export-${Date.now()}.${result.fileExtension}`);
+      }
       setProgress(100);
       setProgressMessage(null);
+      setCompletedMessage(result.savedPath || null);
       setStatus('completed');
     } catch (exportError) {
       if (workerError) {
@@ -667,8 +742,12 @@ export const ExportDialog: React.FC<ExportDialogProps> = ({ clips, tracks, expor
     }
   };
 
-  const handleCancel = () => {
-    cancelRequestedRef.current = true;
+  const handleClose = () => {
+    if (desktopJobIdRef.current) {
+      void cancelDesktopExport(desktopJobIdRef.current);
+      desktopJobIdRef.current = null;
+    }
+    onClose();
   };
 
   return (
@@ -681,7 +760,7 @@ export const ExportDialog: React.FC<ExportDialogProps> = ({ clips, tracks, expor
       >
         <div className="p-6 border-b border-gray-100 flex items-center justify-between">
           <h2 className="text-xl font-bold text-gray-900">Export Sequence</h2>
-          <button onClick={status === 'exporting' ? handleCancel : onClose} className="p-2 hover:bg-gray-100 rounded-full transition-colors">
+          <button onClick={handleClose} className="p-2 hover:bg-gray-100 rounded-full transition-colors">
             <X size={20} className="text-gray-500" />
           </button>
         </div>
@@ -694,8 +773,27 @@ export const ExportDialog: React.FC<ExportDialogProps> = ({ clips, tracks, expor
               </div>
               <h3 className="text-lg font-semibold text-gray-900 mb-2">Ready to Export</h3>
               <p className="text-gray-500 mb-6">
-                Render the selected range at 1080p or higher using the browser export pipeline.
+                Render the selected range at 1080p or higher using either the in-browser pipeline or the local desktop FFmpeg exporter.
               </p>
+
+              <div className="w-full mb-6">
+                <div className="text-xs font-semibold uppercase tracking-[0.2em] text-gray-400 mb-3">Export Engine</div>
+                <div className="flex bg-gray-100 p-1 rounded-xl w-full">
+                  <button
+                    onClick={() => setExportMode('browser')}
+                    className={`flex-1 py-2 rounded-lg text-sm font-bold transition-all ${exportMode === 'browser' ? 'bg-white text-blue-600 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
+                  >
+                    Browser
+                  </button>
+                  <button
+                    onClick={() => setExportMode('desktop-ffmpeg')}
+                    disabled={!desktopExportAvailable}
+                    className={`flex-1 py-2 rounded-lg text-sm font-bold transition-all ${exportMode === 'desktop-ffmpeg' ? 'bg-white text-blue-600 shadow-sm' : 'text-gray-500 hover:text-gray-700'} ${!desktopExportAvailable ? 'opacity-50 cursor-not-allowed' : ''}`}
+                  >
+                    Desktop FFmpeg
+                  </button>
+                </div>
+              </div>
 
               <div className="flex bg-gray-100 p-1 rounded-xl w-full mb-8">
                 <button
@@ -725,13 +823,15 @@ export const ExportDialog: React.FC<ExportDialogProps> = ({ clips, tracks, expor
             <>
               <div className="w-20 h-20 bg-blue-50 rounded-full flex items-center justify-center mb-6 relative">
                 <Loader2 size={40} className="text-blue-600 animate-spin" />
-                <div className="absolute inset-0 flex items-center justify-center">
+              <div className="absolute inset-0 flex items-center justify-center">
                   <span className="text-[10px] font-bold text-blue-600">{Math.round(progress)}%</span>
                 </div>
               </div>
               <h3 className="text-lg font-semibold text-gray-900 mb-2">Exporting Sequence...</h3>
               <p className="text-gray-500 mb-8">
-                Please keep this window open while the exporter renders your video.
+                {exportMode === 'desktop-ffmpeg'
+                  ? 'Please keep this window open while the desktop exporter renders your video.'
+                  : 'Please keep this window open while the exporter renders your video.'}
               </p>
               <div className="w-full h-2 bg-gray-100 rounded-full overflow-hidden mb-2">
                 <motion.div
@@ -754,7 +854,9 @@ export const ExportDialog: React.FC<ExportDialogProps> = ({ clips, tracks, expor
               </div>
               <h3 className="text-lg font-semibold text-gray-900 mb-2">Export Successful!</h3>
               <p className="text-gray-500 mb-8">
-                Your video has been exported and should be downloading automatically.
+                {completedMessage
+                  ? `Your video has been exported and saved to ${completedMessage}.`
+                  : 'Your video has been exported and should be downloading automatically.'}
               </p>
               <button
                 onClick={onClose}

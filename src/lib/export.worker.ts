@@ -8,11 +8,13 @@ import {
   buildAudioMixRange,
   buildExportPlan,
   buildTextLayoutSignature,
+  buildTextRenderMetrics,
   createExportCursor,
   EXPORT_FPS,
   EXPORT_HEIGHT,
   EXPORT_SAMPLE_RATE,
   EXPORT_WIDTH,
+  resolveClipTransformForRender,
 } from './export-shared';
 import { WebGPURenderer } from './renderer-webgpu';
 
@@ -920,48 +922,44 @@ async function runExport(message: ExportJobMessage) {
     for (const clip of textClipsForFrame) {
       if (clip.type !== TrackType.TEXT && clip.type !== TrackType.SUBTITLE) continue;
 
-      const transform = {
-        position: { x: 0, y: 0, z: 0 },
-        rotation: 0,
-        flipHorizontal: false,
-        flipVertical: false,
-        scale: { x: 1, y: 1 },
-        opacity: 1,
-        crop: { top: 0, right: 0, bottom: 0, left: 0 },
-        ...(clip.transform || {}),
-      };
+      const transform = resolveClipTransformForRender(clip.transform, EXPORT_WIDTH, EXPORT_HEIGHT);
+      const textMetrics = buildTextRenderMetrics(clip, EXPORT_WIDTH, EXPORT_HEIGHT);
 
       compositeCtx.save();
       compositeCtx.globalAlpha = transform.opacity ?? 1;
       compositeCtx.translate(EXPORT_WIDTH / 2 + (transform.position.x || 0), EXPORT_HEIGHT / 2 + (transform.position.y || 0));
+      compositeCtx.rotate((transform.rotation * Math.PI) / 180);
+      compositeCtx.scale(
+        (transform.scale?.x || 1) * (transform.flipHorizontal ? -1 : 1),
+        (transform.scale?.y || 1) * (transform.flipVertical ? -1 : 1),
+      );
 
-      const baseFontSize = clip.style?.fontSize || 48;
-      const fontFamily = clip.style?.fontFamily || 'sans-serif';
-      const fontWeight = clip.style?.fontWeight || 'normal';
-      const fontStyle = clip.style?.fontStyle || 'normal';
-      const fontStretch = clip.style?.fontStretch ? `${clip.style.fontStretch} ` : '';
       const fontSignature = plan.textLayoutSignatureByClipId.get(clip.id) ?? buildTextLayoutSignature(clip);
       const cached = textLayoutCache.get(clip.id);
       let measuredWidth = cached?.signature === fontSignature ? cached.width : 0;
 
-      compositeCtx.font = `${fontStyle} ${fontWeight} ${fontStretch}${baseFontSize}px ${fontFamily}`.replace(/\s+/g, ' ').trim();
-      compositeCtx.fillStyle = clip.style?.color || '#ffffff';
+      compositeCtx.font = textMetrics.font;
+      compositeCtx.fillStyle = textMetrics.fillStyle;
       compositeCtx.textAlign = 'center';
       compositeCtx.textBaseline = 'middle';
 
-      if (clip.type === TrackType.SUBTITLE || (clip.style?.backgroundColor && clip.style.backgroundColor !== 'transparent')) {
+      if (clip.type === TrackType.SUBTITLE || (textMetrics.backgroundColor && textMetrics.backgroundColor !== 'transparent')) {
         if (!measuredWidth) {
           measuredWidth = compositeCtx.measureText(clip.content || '').width;
           textLayoutCache.set(clip.id, { signature: fontSignature, width: measuredWidth });
         }
 
-        compositeCtx.fillStyle = clip.style?.backgroundColor || 'rgba(0,0,0,0.6)';
-        compositeCtx.fillRect(-measuredWidth / 2 - 20, -baseFontSize / 2 - 10, measuredWidth + 40, baseFontSize + 20);
-        compositeCtx.fillStyle = clip.style?.color || '#ffffff';
+        compositeCtx.fillStyle = textMetrics.backgroundColor || 'rgba(0,0,0,0.6)';
+        compositeCtx.fillRect(
+          -measuredWidth / 2 - textMetrics.paddingX,
+          -textMetrics.fontSize / 2 - textMetrics.paddingY,
+          measuredWidth + textMetrics.paddingX * 2,
+          textMetrics.fontSize + textMetrics.paddingY * 2,
+        );
+        compositeCtx.fillStyle = textMetrics.fillStyle;
       }
 
-      const offsetY = clip.type === TrackType.SUBTITLE ? (EXPORT_HEIGHT / 2 - 80) : 0;
-      compositeCtx.fillText(clip.content || '', 0, offsetY);
+      compositeCtx.fillText(clip.content || '', 0, textMetrics.offsetY);
       compositeCtx.restore();
     }
 

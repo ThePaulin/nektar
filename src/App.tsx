@@ -1626,14 +1626,25 @@ export default function App() {
           <button className="text-xs text-gray-400 hover:text-white transition-colors">Project Settings</button>
 
           <div className="relative">
-            <button
-              onClick={() => setIsExportMenuOpen(!isExportMenuOpen)}
-              className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-1.5 rounded-md text-xs font-medium flex items-center space-x-2 transition-colors"
-            >
-              <Download size={14} />
-              <span>Export</span>
-              <ChevronDown size={14} className={`transition-transform ${isExportMenuOpen ? 'rotate-180' : ''}`} />
-            </button>
+            <div className="flex items-stretch rounded-md overflow-hidden shadow-sm">
+              <button
+                onClick={handleExportSingle}
+                className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-1.5 text-xs font-medium flex items-center space-x-2 transition-colors"
+                title="Export Single Video File (Shift+E)"
+              >
+                <Download size={14} />
+                <span>Export</span>
+              </button>
+              <button
+                onClick={() => setIsExportMenuOpen(!isExportMenuOpen)}
+                className="bg-blue-600 hover:bg-blue-700 text-white px-2 py-1.5 border-l border-blue-500/60 transition-colors"
+                title="More export options"
+                aria-label="More export options"
+                aria-expanded={isExportMenuOpen}
+              >
+                <ChevronDown size={14} className={`transition-transform ${isExportMenuOpen ? 'rotate-180' : ''}`} />
+              </button>
+            </div>
 
             {isExportMenuOpen && (
               <div className="absolute right-0 mt-2 w-56 bg-[#1A1A1A] border border-white/10 rounded-lg shadow-2xl z-[110] py-1 overflow-hidden">

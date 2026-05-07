@@ -1,12 +1,21 @@
 {
-  "name": "react-example",
+  "name": "nektar",
+  "description": "A dense, timeline-first desktop and web video editor.",
   "private": true,
-  "version": "0.0.0",
+  "version": "0.1.0",
   "type": "module",
+  "main": "dist-electron/electron/main.js",
+  "productName": "Nektar",
+  "author": "Nektar",
   "scripts": {
-    "dev": "tsx server.ts",
+    "dev": "node scripts/run-dev-server.mjs",
     "build": "vite build",
     "preview": "vite preview",
+    "desktop:dev": "npm run desktop:build && node electron/run-desktop-dev.mjs",
+    "desktop:build": "npm run build && tsc -p electron/tsconfig.json",
+    "ffmpeg:fetch": "node scripts/fetch-ffmpeg-binaries.mjs",
+    "desktop:pack": "npm run ffmpeg:fetch && npm run desktop:build && electron-builder --dir && node scripts/repack-built-app.mjs",
+    "desktop:dist": "npm run desktop:pack && electron-builder --prepackaged release/mac-arm64/Nektar.app",
     "clean": "rm -rf dist",
     "lint": "tsc --noEmit",
     "test": "vitest run",
@@ -44,6 +53,8 @@
     "@vitest/coverage-v8": "^4.1.5",
     "@webgpu/types": "^0.1.69",
     "autoprefixer": "^10.4.21",
+    "electron": "^37.2.6",
+    "electron-builder": "^26.8.1",
     "fake-indexeddb": "^6.2.5",
     "jsdom": "^29.0.2",
     "playwright": "^1.59.1",
@@ -53,5 +64,49 @@
     "typescript": "~5.8.2",
     "vite": "^6.2.0",
     "vitest": "^4.1.5"
+  },
+  "build": {
+    "appId": "app.nektar.desktop",
+    "productName": "Nektar",
+    "directories": {
+      "output": "release"
+    },
+    "asar": false,
+    "npmRebuild": false,
+    "electronDist": "node_modules/electron/dist",
+    "files": [
+      "dist/**/*",
+      "dist-electron/**/*",
+      "package.json",
+      "!node_modules/**/*",
+      "!**/._*"
+    ],
+    "extraResources": [
+      {
+        "from": "resources/ffmpeg",
+        "to": "ffmpeg"
+      }
+    ],
+    "mac": {
+      "icon": "build/icon.icns",
+      "identity": null,
+      "target": [
+        "dmg",
+        "zip"
+      ]
+    },
+    "win": {
+      "icon": "build/icon.ico",
+      "target": [
+        "nsis"
+      ]
+    },
+    "linux": {
+      "icon": "build/icon.png",
+      "target": [
+        "AppImage"
+      ],
+      "category": "AudioVideo"
+    }
   }
 }
