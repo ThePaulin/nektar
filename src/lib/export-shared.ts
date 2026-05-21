@@ -116,6 +116,26 @@ export interface ExportAudioMixRange {
   gain: number;
 }
 
+export interface RenderCrop {
+  top: number;
+  right: number;
+  bottom: number;
+  left: number;
+}
+
+export interface AspectFitRenderMetrics {
+  sx: number;
+  sy: number;
+  sw: number;
+  sh: number;
+  dx: number;
+  dy: number;
+  dw: number;
+  dh: number;
+  scaleX: number;
+  scaleY: number;
+}
+
 export interface ExportTimelinePlan {
   visibleTracks: Track[];
   trackById: Map<string, Track>;
@@ -202,6 +222,60 @@ export function buildTextRenderMetrics(
     offsetY: clip.type === TrackType.SUBTITLE
       ? (COMPOSITION_REFERENCE_HEIGHT / 2 - 80) * (targetHeight / COMPOSITION_REFERENCE_HEIGHT)
       : 0,
+  };
+}
+
+export function getAspectFitRenderMetrics(
+  sourceWidth: number,
+  sourceHeight: number,
+  targetWidth: number,
+  targetHeight: number,
+  crop?: Partial<RenderCrop>,
+): AspectFitRenderMetrics {
+  const safeCrop: RenderCrop = {
+    top: crop?.top ?? 0,
+    right: crop?.right ?? 0,
+    bottom: crop?.bottom ?? 0,
+    left: crop?.left ?? 0,
+  };
+
+  const sx = (safeCrop.left / 100) * sourceWidth;
+  const sy = (safeCrop.top / 100) * sourceHeight;
+  const sw = Math.max(0, sourceWidth * (1 - (safeCrop.left + safeCrop.right) / 100));
+  const sh = Math.max(0, sourceHeight * (1 - (safeCrop.top + safeCrop.bottom) / 100));
+
+  if (sw === 0 || sh === 0 || targetWidth === 0 || targetHeight === 0) {
+    return {
+      sx,
+      sy,
+      sw,
+      sh,
+      dx: -targetWidth / 2,
+      dy: -targetHeight / 2,
+      dw: 0,
+      dh: 0,
+      scaleX: 0,
+      scaleY: 0,
+    };
+  }
+
+  const widthScale = targetWidth / sw;
+  const heightScale = targetHeight / sh;
+  const scale = Math.min(widthScale, heightScale);
+  const dw = sw * scale;
+  const dh = sh * scale;
+
+  return {
+    sx,
+    sy,
+    sw,
+    sh,
+    dx: -dw / 2,
+    dy: -dh / 2,
+    dw,
+    dh,
+    scaleX: dw / targetWidth,
+    scaleY: dh / targetHeight,
   };
 }
 

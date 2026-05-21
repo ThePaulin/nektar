@@ -215,10 +215,17 @@ export function trimClipState(
   return resolveClipOverlaps(updatedClip, updatedClips);
 }
 
-export function splitClipState(clips: VideoObjType, currentTime: number) {
-  const clipToSplit = clips.find(
-    (clip) => currentTime > clip.timelinePosition.start && currentTime < clip.timelinePosition.end,
-  );
+export function splitClipState(clips: VideoObjType, currentTime: number, clipId?: number) {
+  const clipToSplit = clipId !== undefined
+    ? clips.find(
+      (clip) =>
+        clip.id === clipId &&
+        currentTime > clip.timelinePosition.start &&
+        currentTime < clip.timelinePosition.end,
+    )
+    : clips.find(
+      (clip) => currentTime > clip.timelinePosition.start && currentTime < clip.timelinePosition.end,
+    );
 
   if (!clipToSplit) return { clips, selectedClipId: null as number | null };
 
@@ -275,12 +282,17 @@ export function splitClipState(clips: VideoObjType, currentTime: number) {
   return { clips: nextState, selectedClipId: secondClip.id };
 }
 
-export function deleteClipsState(clips: VideoObjType, selectedClipIds: number[], currentTime: number) {
+export function deleteClipsState(
+  clips: VideoObjType,
+  selectedClipIds: number[],
+  currentTime: number,
+  hasExplicitSelection = selectedClipIds.length > 0,
+) {
   let clipsToDelete: VideoClip[] = [];
 
   if (selectedClipIds.length > 0) {
     clipsToDelete = clips.filter((clip) => selectedClipIds.includes(clip.id));
-  } else {
+  } else if (!hasExplicitSelection) {
     const clipUnderPlayhead = clips.find(
       (clip) => currentTime >= clip.timelinePosition.start && currentTime <= clip.timelinePosition.end,
     );
@@ -298,12 +310,17 @@ export function deleteClipsState(clips: VideoObjType, selectedClipIds: number[],
   };
 }
 
-export function rippleDeleteClipsState(clips: VideoObjType, selectedClipIds: number[], currentTime: number) {
+export function rippleDeleteClipsState(
+  clips: VideoObjType,
+  selectedClipIds: number[],
+  currentTime: number,
+  hasExplicitSelection = selectedClipIds.length > 0,
+) {
   let clipsToDelete: VideoClip[] = [];
 
   if (selectedClipIds.length > 0) {
     clipsToDelete = clips.filter((clip) => selectedClipIds.includes(clip.id));
-  } else {
+  } else if (!hasExplicitSelection) {
     const clipUnderPlayhead = clips.find(
       (clip) => currentTime >= clip.timelinePosition.start && currentTime <= clip.timelinePosition.end,
     );

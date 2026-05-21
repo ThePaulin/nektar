@@ -147,6 +147,9 @@ function ffmpegEscapeText(value) {
 function codecLooksLikeAudio(codec) {
     return /^(aac|ac-3|ac3|alac|ec-3|eac3|flac|mp3|mp4a|opus|pcm|ulaw|vorbis)/.test(codec);
 }
+function formatScaleMultiplier(value) {
+    return Number.isFinite(value) ? value.toFixed(6).replace(/\.?0+$/, '') : '1';
+}
 function assetHasAudioStream(request, asset) {
     if (asset.kind === 'audio')
         return true;
@@ -216,12 +219,14 @@ export function buildFfmpegCommand({ request, materializedAssets, outputPath, })
         const scaleX = clip.transform?.scale.x ?? 1;
         const scaleY = clip.transform?.scale.y ?? 1;
         const crop = clip.transform?.crop;
-        const positionX = Math.round((clip.transform?.position.x ?? 0) + request.width / 2 - request.width / 2 * scaleX);
-        const positionY = Math.round((clip.transform?.position.y ?? 0) + request.height / 2 - request.height / 2 * scaleY);
         const currentInput = inputIndex;
         inputIndex += 1;
         if (asset.kind === 'video' || asset.kind === 'image') {
             const sourceLabel = `vclip${clip.id}`;
+            const fittedLabel = `vfit${clip.id}`;
+            const scaledLabel = `vscaled${clip.id}`;
+            const layerLabel = `vlayer${clip.id}`;
+            const baseLabel = `vclipbase${clip.id}`;
             const videoFilterSegments = [];
             if (asset.kind === 'video') {
                 videoFilterSegments.push(`trim=start=${trimStart}:duration=${visibleDuration}`, 'setpts=PTS-STARTPTS');
@@ -236,19 +241,27 @@ export function buildFfmpegCommand({ request, materializedAssets, outputPath, })
                 const yExpr = `ih*${crop.top / 100}`;
                 videoFilterSegments.push(`crop=${widthExpr}:${heightExpr}:${xExpr}:${yExpr}`);
             }
-            if (scaleX !== 1 || scaleY !== 1) {
-                videoFilterSegments.push(`scale=${Math.round(request.width * scaleX)}:${Math.round(request.height * scaleY)}`);
-            }
-            else {
-                videoFilterSegments.push(`scale=${request.width}:${request.height}`);
-            }
+            videoFilterSegments.push('setsar=1', 'format=rgba');
             if (opacity !== 1) {
-                videoFilterSegments.push(`format=rgba,colorchannelmixer=aa=${opacity}`);
+                videoFilterSegments.push(`colorchannelmixer=aa=${opacity}`);
             }
             filterParts.push(`[${currentInput}:v]${videoFilterSegments.join(',')}[${sourceLabel}]`);
+            filterParts.push(`[${sourceLabel}]scale=${request.width}:${request.height}:force_original_aspect_ratio=decrease[${fittedLabel}]`);
+            const scaleExprX = formatScaleMultiplier(scaleX);
+            const scaleExprY = formatScaleMultiplier(scaleY);
+            if (scaleX !== 1 || scaleY !== 1) {
+                filterParts.push(`[${fittedLabel}]scale=iw*${scaleExprX}:ih*${scaleExprY}[${scaledLabel}]`);
+            }
+            else {
+                filterParts.push(`[${fittedLabel}]copy[${scaledLabel}]`);
+            }
+            filterParts.push(`color=c=black@0.0:s=${request.width}x${request.height}:d=${visibleDuration}[${baseLabel}]`);
+            const centeredXExpr = `(${request.width}-w)/2+${clip.transform?.position.x ?? 0}`;
+            const centeredYExpr = `(${request.height}-h)/2+${clip.transform?.position.y ?? 0}`;
+            filterParts.push(`[${baseLabel}][${scaledLabel}]overlay=${centeredXExpr}:${centeredYExpr}:shortest=1[${layerLabel}]`);
             const layerInput = layerIndex === 0 ? 'base0' : `vout${layerIndex - 1}`;
             const enable = `between(t,${Math.max(0, clip.timelinePosition.start - request.range.start)},${Math.max(0, clip.timelinePosition.end - request.range.start)})`;
-            filterParts.push(`[${layerInput}][${sourceLabel}]overlay=${positionX}:${positionY}:enable='${enable}'[vout${layerIndex}]`);
+            filterParts.push(`[${layerInput}][${layerLabel}]overlay=0:0:enable='${enable}'[vout${layerIndex}]`);
             layerIndex += 1;
         }
         if (asset.kind !== 'image' && assetHasAudioStream(request, asset)) {

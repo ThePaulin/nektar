@@ -2,7 +2,7 @@ import React, { useRef, useEffect, useMemo, useState, useCallback } from 'react'
 import { VideoObjType, VideoClip, Track, TrackType, LUTData } from '../types';
 import { WebGLLUT } from '../lib/webgl-lut';
 import { WebGPURenderer } from '../lib/renderer-webgpu';
-import { buildTextRenderMetrics, resolveClipTransformForRender } from '../lib/export-shared';
+import { buildTextRenderMetrics, getAspectFitRenderMetrics, resolveClipTransformForRender } from '../lib/export-shared';
 
 interface VideoPreviewProps {
   clips: VideoObjType;
@@ -176,10 +176,13 @@ export const VideoPreview: React.FC<VideoPreviewProps> = ({
         
         if (isReady && !hasError) {
           const crop = transform.crop || { top: 0, right: 0, bottom: 0, left: 0 };
-          const sx = (crop.left / 100) * video.videoWidth;
-          const sy = (crop.top / 100) * video.videoHeight;
-          const sw = video.videoWidth * (1 - (crop.left + crop.right) / 100);
-          const sh = video.videoHeight * (1 - (crop.top + crop.bottom) / 100);
+          const renderMetrics = getAspectFitRenderMetrics(
+            video.videoWidth,
+            video.videoHeight,
+            PLAYBACK_WIDTH,
+            PLAYBACK_HEIGHT,
+            crop,
+          );
 
           const parentTrack = track.parentId ? tracks.find(t => t.id === track.parentId) : null;
           const effectiveTrack = parentTrack || track;
@@ -212,17 +215,58 @@ export const VideoPreview: React.FC<VideoPreviewProps> = ({
                   useRect ? clip.overlayRect : undefined,
                   video.videoWidth,
                   video.videoHeight,
-                  transform.crop
+                  transform.crop,
+                  renderMetrics
                 );
-                oCtx.drawImage(lutProcessingCanvasRef.current!, -PLAYBACK_WIDTH/2, -PLAYBACK_HEIGHT/2, PLAYBACK_WIDTH, PLAYBACK_HEIGHT);
+                oCtx.drawImage(
+                  lutProcessingCanvasRef.current!,
+                  0,
+                  0,
+                  PLAYBACK_WIDTH,
+                  PLAYBACK_HEIGHT,
+                  -PLAYBACK_WIDTH / 2,
+                  -PLAYBACK_HEIGHT / 2,
+                  PLAYBACK_WIDTH,
+                  PLAYBACK_HEIGHT,
+                );
               } else {
-                oCtx.drawImage(video, sx, sy, sw, sh, -PLAYBACK_WIDTH/2, -PLAYBACK_HEIGHT/2, PLAYBACK_WIDTH, PLAYBACK_HEIGHT);
+                oCtx.drawImage(
+                  video,
+                  renderMetrics.sx,
+                  renderMetrics.sy,
+                  renderMetrics.sw,
+                  renderMetrics.sh,
+                  renderMetrics.dx,
+                  renderMetrics.dy,
+                  renderMetrics.dw,
+                  renderMetrics.dh,
+                );
               }
             } else {
-              oCtx.drawImage(video, sx, sy, sw, sh, -PLAYBACK_WIDTH/2, -PLAYBACK_HEIGHT/2, PLAYBACK_WIDTH, PLAYBACK_HEIGHT);
+              oCtx.drawImage(
+                video,
+                renderMetrics.sx,
+                renderMetrics.sy,
+                renderMetrics.sw,
+                renderMetrics.sh,
+                renderMetrics.dx,
+                renderMetrics.dy,
+                renderMetrics.dw,
+                renderMetrics.dh,
+              );
             }
           } else {
-            oCtx.drawImage(video, sx, sy, sw, sh, -PLAYBACK_WIDTH/2, -PLAYBACK_HEIGHT/2, PLAYBACK_WIDTH, PLAYBACK_HEIGHT);
+            oCtx.drawImage(
+              video,
+              renderMetrics.sx,
+              renderMetrics.sy,
+              renderMetrics.sw,
+              renderMetrics.sh,
+              renderMetrics.dx,
+              renderMetrics.dy,
+              renderMetrics.dw,
+              renderMetrics.dh,
+            );
           }
         }
         
@@ -231,13 +275,28 @@ export const VideoPreview: React.FC<VideoPreviewProps> = ({
         }
       } else if (clip.type === TrackType.IMAGE) {
         const img = imageRefs.current[clip.id];
-        if (img && img.complete) {
+        const sourceWidth = img?.naturalWidth || 0;
+        const sourceHeight = img?.naturalHeight || 0;
+        if (img && img.complete && sourceWidth > 0 && sourceHeight > 0) {
           const crop = transform.crop || { top: 0, right: 0, bottom: 0, left: 0 };
-          const sx = (crop.left / 100) * img.width;
-          const sy = (crop.top / 100) * img.height;
-          const sw = img.width * (1 - (crop.left + crop.right) / 100);
-          const sh = img.height * (1 - (crop.top + crop.bottom) / 100);
-          oCtx.drawImage(img, sx, sy, sw, sh, -PLAYBACK_WIDTH/2, -PLAYBACK_HEIGHT/2, PLAYBACK_WIDTH, PLAYBACK_HEIGHT);
+          const renderMetrics = getAspectFitRenderMetrics(
+            sourceWidth,
+            sourceHeight,
+            PLAYBACK_WIDTH,
+            PLAYBACK_HEIGHT,
+            crop,
+          );
+          oCtx.drawImage(
+            img,
+            renderMetrics.sx,
+            renderMetrics.sy,
+            renderMetrics.sw,
+            renderMetrics.sh,
+            renderMetrics.dx,
+            renderMetrics.dy,
+            renderMetrics.dw,
+            renderMetrics.dh,
+          );
         }
       } else if (clip.type === TrackType.TEXT || clip.type === TrackType.SUBTITLE) {
         const textMetrics = buildTextRenderMetrics(clip, PLAYBACK_WIDTH, PLAYBACK_HEIGHT);
@@ -271,8 +330,10 @@ export const VideoPreview: React.FC<VideoPreviewProps> = ({
     }
   }, [activeClips, tracks, isPlaying, offscreenCanvas, lutDataMap, showLutPreview, useWebGPU, lutTextures, isRendererInitialized]);
 
-  // Force a render when any video element is ready
-  const handleVideoReady = useCallback(() => {
+  // Force a render when any media element becomes ready.
+  // Images need the same invalidation path as video clips so the canvas redraws
+  // as soon as the blob finishes loading.
+  const handleMediaReady = useCallback(() => {
     if (!isPlaying) {
       render(true);
     }
@@ -391,13 +452,13 @@ export const VideoPreview: React.FC<VideoPreviewProps> = ({
                 muted
                 preload="auto"
                 crossOrigin="anonymous"
-                onSeeked={handleVideoReady}
-                onLoadedData={handleVideoReady}
-                onLoadedMetadata={handleVideoReady}
-                onCanPlay={handleVideoReady}
-                onCanPlayThrough={handleVideoReady}
-                onPlaying={handleVideoReady}
-                onWaiting={handleVideoReady}
+                onSeeked={handleMediaReady}
+                onLoadedData={handleMediaReady}
+                onLoadedMetadata={handleMediaReady}
+                onCanPlay={handleMediaReady}
+                onCanPlayThrough={handleMediaReady}
+                onPlaying={handleMediaReady}
+                onWaiting={handleMediaReady}
               />
             );
           }
@@ -406,9 +467,11 @@ export const VideoPreview: React.FC<VideoPreviewProps> = ({
               <img
                 key={clip.id}
                 ref={(el) => (imageRefs.current[clip.id] = el)}
-                src={clip.thumbnailUrl}
+                src={clip.thumbnailUrl || clip.videoUrl || ''}
                 crossOrigin="anonymous"
                 referrerPolicy="no-referrer"
+                onLoad={handleMediaReady}
+                onError={handleMediaReady}
               />
             );
           }

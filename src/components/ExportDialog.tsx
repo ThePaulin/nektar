@@ -10,6 +10,7 @@ import {
   EXPORT_HEIGHT,
   EXPORT_SAMPLE_RATE,
   EXPORT_WIDTH,
+  getAspectFitRenderMetrics,
   resolveClipTransformForRender,
 } from '../lib/export-shared';
 import {
@@ -533,20 +534,46 @@ export const ExportDialog: React.FC<ExportDialogProps> = ({ clips, tracks, expor
           if (clip.type === TrackType.VIDEO || clip.type === TrackType.SCREEN) {
             const video = videoElementsRef.current[clip.id];
             if (video && video.videoWidth > 0 && video.videoHeight > 0) {
-              const sx = (crop.left / 100) * video.videoWidth;
-              const sy = (crop.top / 100) * video.videoHeight;
-              const sw = video.videoWidth * (1 - (crop.left + crop.right) / 100);
-              const sh = video.videoHeight * (1 - (crop.top + crop.bottom) / 100);
-              offscreenCtx.drawImage(video, sx, sy, sw, sh, -EXPORT_WIDTH / 2, -EXPORT_HEIGHT / 2, EXPORT_WIDTH, EXPORT_HEIGHT);
+              const renderMetrics = getAspectFitRenderMetrics(
+                video.videoWidth,
+                video.videoHeight,
+                EXPORT_WIDTH,
+                EXPORT_HEIGHT,
+                crop,
+              );
+              offscreenCtx.drawImage(
+                video,
+                renderMetrics.sx,
+                renderMetrics.sy,
+                renderMetrics.sw,
+                renderMetrics.sh,
+                renderMetrics.dx,
+                renderMetrics.dy,
+                renderMetrics.dw,
+                renderMetrics.dh,
+              );
             }
           } else if (clip.type === TrackType.IMAGE) {
             const image = imageElementsRef.current[clip.id];
             if (image && image.width > 0 && image.height > 0) {
-              const sx = (crop.left / 100) * image.width;
-              const sy = (crop.top / 100) * image.height;
-              const sw = image.width * (1 - (crop.left + crop.right) / 100);
-              const sh = image.height * (1 - (crop.top + crop.bottom) / 100);
-              offscreenCtx.drawImage(image, sx, sy, sw, sh, -EXPORT_WIDTH / 2, -EXPORT_HEIGHT / 2, EXPORT_WIDTH, EXPORT_HEIGHT);
+              const renderMetrics = getAspectFitRenderMetrics(
+                image.width,
+                image.height,
+                EXPORT_WIDTH,
+                EXPORT_HEIGHT,
+                crop,
+              );
+              offscreenCtx.drawImage(
+                image,
+                renderMetrics.sx,
+                renderMetrics.sy,
+                renderMetrics.sw,
+                renderMetrics.sh,
+                renderMetrics.dx,
+                renderMetrics.dy,
+                renderMetrics.dw,
+                renderMetrics.dh,
+              );
             }
           } else if (clip.type === TrackType.TEXT || clip.type === TrackType.SUBTITLE) {
             const textMetrics = buildTextRenderMetrics(clip, EXPORT_WIDTH, EXPORT_HEIGHT);

@@ -922,7 +922,10 @@ export default function App() {
   };
 
   const handleSplit = () => {
-    const clipToSplit = clips.find(
+    const selectedClip = selectedClipIds.length > 0
+      ? clips.find((clip) => clip.id === selectedClipIds[0])
+      : undefined;
+    const clipToSplit = selectedClip || clips.find(
       (c) => currentTime > c.timelinePosition.start && currentTime < c.timelinePosition.end
     );
 
@@ -931,7 +934,7 @@ export default function App() {
         alert('This track is locked and cannot be modified.');
         return;
       }
-      const nextState = splitClipState(clips, currentTime);
+      const nextState = splitClipState(clips, currentTime, clipToSplit.id);
       pushToHistory(nextState.clips);
       if (nextState.selectedClipId !== null) {
         setSelectedClipIds([nextState.selectedClipId]);
@@ -944,7 +947,7 @@ export default function App() {
       const clip = clips.find((entry) => entry.id === id);
       return clip ? !isTrackLocked(clip.trackId) : false;
     });
-    const nextState = deleteClipsState(clips, unlockedSelection, currentTime);
+    const nextState = deleteClipsState(clips, unlockedSelection, currentTime, selectedClipIds.length > 0);
     if (nextState.deletedClips.length === 0) return;
 
     nextState.deletedClips.forEach((clip) => {
@@ -961,7 +964,7 @@ export default function App() {
       const clip = clips.find((entry) => entry.id === id);
       return clip ? !isTrackLocked(clip.trackId) : false;
     });
-    const nextState = rippleDeleteClipsState(clips, unlockedSelection, currentTime);
+    const nextState = rippleDeleteClipsState(clips, unlockedSelection, currentTime, selectedClipIds.length > 0);
     if (nextState.deletedClips.length === 0) return;
 
     nextState.deletedClips.forEach((clip) => {
@@ -1143,6 +1146,183 @@ export default function App() {
     setIsExportMenuOpen(false);
   };
 
+  const navigateClipSelection = useCallback((direction: 'left' | 'right' | 'up' | 'down', additive: boolean) => {
+    const visibleTracks = tracks.filter((track) => {
+      if (track.isSubTrack) {
+        return clips.some((clip) => clip.trackId === track.id);
+      }
+      return true;
+    });
+
+    if (visibleTracks.length === 0) return;
+
+    const trackIndexById = new Map(visibleTracks.map((track, index) => [track.id, index]));
+    const selectedClipsInSelectionOrder = selectedClipIds
+      .map((clipId, selectionIndex) => {
+        const clip = clips.find((entry) => entry.id === clipId);
+        return clip ? { clip, selectionIndex } : null;
+      })
+      .filter((entry): entry is { clip: VideoClip; selectionIndex: number } => entry !== null);
+
+    const anchorClip = selectedClipsInSelectionOrder.length > 0
+      ? [...selectedClipsInSelectionOrder].sort((a, b) => {
+        if (direction === 'left') {
+          if (a.clip.timelinePosition.start !== b.clip.timelinePosition.start) {
+            return a.clip.timelinePosition.start - b.clip.timelinePosition.start;
+          }
+        } else if (direction === 'right') {
+          if (a.clip.timelinePosition.end !== b.clip.timelinePosition.end) {
+            return b.clip.timelinePosition.end - a.clip.timelinePosition.end;
+          }
+        } else if (direction === 'up' || direction === 'down') {
+          const trackIndexA = trackIndexById.get(a.clip.trackId) ?? Number.MAX_SAFE_INTEGER;
+          const trackIndexB = trackIndexById.get(b.clip.trackId) ?? Number.MAX_SAFE_INTEGER;
+          if (trackIndexA !== trackIndexB) {
+            return direction === 'up' ? trackIndexA - trackIndexB : trackIndexB - trackIndexA;
+          }
+        }
+
+        return b.selectionIndex - a.selectionIndex;
+      })[0].clip
+      : undefined;
+
+    const fallbackTrackId = anchorClip?.trackId ?? selectedTrackId;
+    const anchorTrackIndex = visibleTracks.findIndex((track) => track.id === fallbackTrackId);
+    if (anchorTrackIndex === -1) return;
+
+    const getDistanceToRange = (clip: VideoClip, rangeStart: number, rangeEnd: number) => {
+      if (clip.timelinePosition.end < rangeStart) {
+        return rangeStart - clip.timelinePosition.end;
+      }
+      if (clip.timelinePosition.start > rangeEnd) {
+        return clip.timelinePosition.start - rangeEnd;
+      }
+      return 0;
+    };
+
+    const pickVerticalClip = (trackId: string, rangeStart: number, rangeEnd: number) => {
+      const trackClips = clips.filter((clip) => clip.trackId === trackId);
+      if (trackClips.length === 0) return undefined;
+
+      const overlapping = trackClips
+        .filter((clip) => clip.timelinePosition.end >= rangeStart && clip.timelinePosition.start <= rangeEnd)
+        .sort((a, b) => {
+          const overlapA = Math.min(a.timelinePosition.end, rangeEnd) - Math.max(a.timelinePosition.start, rangeStart);
+          const overlapB = Math.min(b.timelinePosition.end, rangeEnd) - Math.max(b.timelinePosition.start, rangeStart);
+          if (overlapB !== overlapA) return overlapB - overlapA;
+          return a.timelinePosition.start - b.timelinePosition.start;
+        });
+
+      if (overlapping.length > 0) return overlapping[0];
+
+      return [...trackClips].sort((a, b) => {
+        const distanceA = getDistanceToRange(a, rangeStart, rangeEnd);
+        const distanceB = getDistanceToRange(b, rangeStart, rangeEnd);
+        if (distanceA !== distanceB) return distanceA - distanceB;
+        return a.timelinePosition.start - b.timelinePosition.start;
+      })[0];
+    };
+
+    const pickDirectionalFallback = (rangeStart: number, rangeEnd: number) => {
+      const candidates = clips.filter((clip) => {
+        if (anchorClip && clip.id === anchorClip.id) return false;
+
+        const clipTrackIndex = trackIndexById.get(clip.trackId);
+        if (clipTrackIndex === undefined) return false;
+
+        if (direction === 'left') return clip.timelinePosition.end <= rangeStart;
+        if (direction === 'right') return clip.timelinePosition.start >= rangeEnd;
+        if (direction === 'up') return clipTrackIndex < anchorTrackIndex;
+        return clipTrackIndex > anchorTrackIndex;
+      });
+
+      return candidates.sort((a, b) => {
+        const trackIndexA = trackIndexById.get(a.trackId)!;
+        const trackIndexB = trackIndexById.get(b.trackId)!;
+
+        if (direction === 'left' || direction === 'right') {
+          const horizontalDistanceA = direction === 'left'
+            ? rangeStart - a.timelinePosition.end
+            : a.timelinePosition.start - rangeEnd;
+          const horizontalDistanceB = direction === 'left'
+            ? rangeStart - b.timelinePosition.end
+            : b.timelinePosition.start - rangeEnd;
+          if (horizontalDistanceA !== horizontalDistanceB) return horizontalDistanceA - horizontalDistanceB;
+
+          const verticalDistanceA = Math.abs(trackIndexA - anchorTrackIndex);
+          const verticalDistanceB = Math.abs(trackIndexB - anchorTrackIndex);
+          if (verticalDistanceA !== verticalDistanceB) return verticalDistanceA - verticalDistanceB;
+
+          return getDistanceToRange(a, rangeStart, rangeEnd) - getDistanceToRange(b, rangeStart, rangeEnd);
+        }
+
+        const verticalDistanceA = Math.abs(trackIndexA - anchorTrackIndex);
+        const verticalDistanceB = Math.abs(trackIndexB - anchorTrackIndex);
+        if (verticalDistanceA !== verticalDistanceB) return verticalDistanceA - verticalDistanceB;
+
+        const horizontalDistanceA = getDistanceToRange(a, rangeStart, rangeEnd);
+        const horizontalDistanceB = getDistanceToRange(b, rangeStart, rangeEnd);
+        if (horizontalDistanceA !== horizontalDistanceB) return horizontalDistanceA - horizontalDistanceB;
+
+        return a.timelinePosition.start - b.timelinePosition.start;
+      })[0];
+    };
+
+    let targetClip: VideoClip | undefined;
+    const rangeStart = anchorClip ? anchorClip.timelinePosition.start : currentTime;
+    const rangeEnd = anchorClip ? anchorClip.timelinePosition.end : currentTime;
+
+    if (direction === 'left' || direction === 'right') {
+      const trackId = anchorClip?.trackId ?? fallbackTrackId;
+      const trackClips = clips
+        .filter((clip) => clip.trackId === trackId)
+        .sort((a, b) => a.timelinePosition.start - b.timelinePosition.start);
+
+      if (anchorClip) {
+        targetClip = direction === 'left'
+          ? [...trackClips]
+            .filter((clip) => clip.id !== anchorClip.id && clip.timelinePosition.end <= anchorClip.timelinePosition.start)
+            .sort((a, b) => b.timelinePosition.end - a.timelinePosition.end)[0]
+          : trackClips
+            .filter((clip) => clip.id !== anchorClip.id && clip.timelinePosition.start >= anchorClip.timelinePosition.end)
+            .sort((a, b) => a.timelinePosition.start - b.timelinePosition.start)[0];
+      } else {
+        targetClip = direction === 'left'
+          ? [...trackClips]
+            .filter((clip) => clip.timelinePosition.end <= currentTime)
+            .sort((a, b) => b.timelinePosition.end - a.timelinePosition.end)[0]
+          : trackClips
+            .filter((clip) => clip.timelinePosition.start >= currentTime)
+            .sort((a, b) => a.timelinePosition.start - b.timelinePosition.start)[0];
+      }
+
+      if (!targetClip && additive) {
+        targetClip = pickDirectionalFallback(rangeStart, rangeEnd);
+      }
+    } else {
+      const step = direction === 'up' ? -1 : 1;
+      for (let targetTrackIndex = anchorTrackIndex + step; targetTrackIndex >= 0 && targetTrackIndex < visibleTracks.length; targetTrackIndex += step) {
+        const targetTrackId = visibleTracks[targetTrackIndex].id;
+        targetClip = pickVerticalClip(targetTrackId, rangeStart, rangeEnd);
+        if (targetClip) break;
+      }
+
+      if (!targetClip && additive) {
+        targetClip = pickDirectionalFallback(rangeStart, rangeEnd);
+      }
+    }
+
+    if (!targetClip) return;
+
+    setSelectedTrackId(targetClip.trackId);
+    setSelectedClipIds((prev) => {
+      if (!additive || !anchorClip) {
+        return [targetClip.id];
+      }
+      return prev.includes(targetClip.id) ? prev : [...prev, targetClip.id];
+    });
+  }, [clips, currentTime, selectedClipIds, selectedTrackId, tracks]);
+
   // Keyboard Shortcuts
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -1158,7 +1338,12 @@ export default function App() {
       }
 
       // Don't trigger shortcuts if user is typing in an input
-      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) {
+      if (
+        e.target instanceof HTMLInputElement ||
+        e.target instanceof HTMLTextAreaElement ||
+        e.target instanceof HTMLSelectElement ||
+        (e.target instanceof HTMLElement && e.target.isContentEditable)
+      ) {
         return;
       }
 
@@ -1281,6 +1466,17 @@ export default function App() {
         const step = isShift ? 1 : 0.1;
         setCurrentTime(prev => Math.min(totalDuration, prev + step));
       }
+
+      if (!isMod && !isAlt && ['h', 'j', 'k', 'l'].includes(key)) {
+        e.preventDefault();
+        const directionByKey: Record<string, 'left' | 'down' | 'up' | 'right'> = {
+          h: 'left',
+          j: 'down',
+          k: 'up',
+          l: 'right',
+        };
+        navigateClipSelection(directionByKey[key], isShift);
+      }
     };
 
     window.addEventListener('keydown', handleKeyDown);
@@ -1303,7 +1499,8 @@ export default function App() {
     handleExportZip,
     handleExportSingle,
     handleClipDownload,
-    handleImportClick
+    handleImportClick,
+    navigateClipSelection
   ]);
 
   useEffect(() => {

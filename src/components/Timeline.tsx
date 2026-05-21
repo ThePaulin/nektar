@@ -121,6 +121,21 @@ export const Timeline: React.FC<TimelineProps> = ({
   const initialSelectionRef = useRef<number[]>([]);
 
   const SNAP_THRESHOLD_PX = 10;
+  const visibleTracks = tracks.filter((track) => {
+    if (track.isSubTrack) {
+      return clips.some((clip) => clip.trackId === track.id);
+    }
+    return true;
+  });
+  const visibleTrackOffsets = (() => {
+    let top = 0;
+    return visibleTracks.reduce((acc: Record<string, { top: number; height: number }>, track) => {
+      const height = track.isSubTrack ? TRACK_HEIGHTS.sm : trackHeight;
+      acc[track.id] = { top, height };
+      top += height;
+      return acc;
+    }, {});
+  })();
 
   useEffect(() => {
     const timelineEl = timelineRootRef.current;
@@ -250,8 +265,10 @@ export const Timeline: React.FC<TimelineProps> = ({
       }
 
       // Track switching logic
-      const trackIndex = Math.floor(y / trackHeight);
-      const targetTrack = tracks[trackIndex];
+      const targetTrack = visibleTracks.find((track) => {
+        const offset = visibleTrackOffsets[track.id];
+        return offset ? y >= offset.top && y < offset.top + offset.height : false;
+      });
       
       // Prevent moving to a locked track
       if (targetTrack && targetTrack.isLocked) return;
@@ -344,13 +361,13 @@ export const Timeline: React.FC<TimelineProps> = ({
         const marqueeSelectedIds = clips.filter(clip => {
           const track = tracks.find(t => t.id === clip.trackId);
           if (track?.isLocked) return false;
+          const trackOffset = visibleTrackOffsets[clip.trackId];
+          if (!trackOffset) return false;
 
           const clipX1 = clip.timelinePosition.start * pixelsPerSecond;
           const clipX2 = clip.timelinePosition.end * pixelsPerSecond;
-
-          const trackIndex = tracks.findIndex(t => t.id === clip.trackId);
-          const clipY1 = trackIndex * trackHeight;
-          const clipY2 = clipY1 + trackHeight;
+          const clipY1 = trackOffset.top;
+          const clipY2 = clipY1 + trackOffset.height;
 
           return (
             clipX1 < x2 &&
@@ -385,7 +402,7 @@ export const Timeline: React.FC<TimelineProps> = ({
       window.removeEventListener('mousemove', handleMouseMove);
       window.removeEventListener('mouseup', handleMouseUp);
     };
-  }, [isSelecting, clips, pixelsPerSecond, onSelectionChange, tracks]);
+  }, [isSelecting, clips, pixelsPerSecond, onSelectionChange, tracks, visibleTrackOffsets]);
 
   useEffect(() => {
     const onPlayheadMouseUp = () => {
@@ -641,14 +658,7 @@ export const Timeline: React.FC<TimelineProps> = ({
               onReorder={onTracksReorder}
               className="flex flex-col"
             >
-              {tracks
-                .filter(track => {
-                  if (track.isSubTrack) {
-                    const hasClips = clips.some(c => c.trackId === track.id);
-                    return hasClips;
-                  }
-                  return true;
-                })
+              {visibleTracks
                 .map((track) => {
                   const currentTrackHeight = track.isSubTrack ? TRACK_HEIGHTS.sm : trackHeight;
                   
@@ -884,14 +894,7 @@ export const Timeline: React.FC<TimelineProps> = ({
             >
               {/* Tracks Area */}
               <div className="relative">
-                {tracks
-                  .filter(track => {
-                    if (track.isSubTrack) {
-                      const hasClips = clips.some(c => c.trackId === track.id);
-                      return hasClips;
-                    }
-                    return true;
-                  })
+                {visibleTracks
                   .map((track) => {
                     const currentTrackHeight = track.isSubTrack ? TRACK_HEIGHTS.sm : trackHeight;
                     
@@ -994,9 +997,18 @@ export const Timeline: React.FC<TimelineProps> = ({
                             <div className="w-full h-full flex items-center justify-center bg-blue-900/10">
                               <span className="text-[10px] text-blue-400/50 font-bold uppercase tracking-widest">Group Track</span>
                             </div>
-                          ) : clip.type === TrackType.VIDEO || clip.type === TrackType.IMAGE || clip.type === TrackType.SCREEN ? (
+                          ) : clip.type === TrackType.VIDEO || clip.type === TrackType.SCREEN ? (
                             <ThumbnailStrip
                               videoUrl={clip.videoUrl || clip.thumbnailUrl || ''}
+                              duration={clip.duration}
+                              sourceStart={clip.sourceStart}
+                              pixelsPerSecond={pixelsPerSecond}
+                              clipWidth={duration * pixelsPerSecond}
+                            />
+                          ) : clip.type === TrackType.IMAGE ? (
+                            <ThumbnailStrip
+                              videoUrl=""
+                              imageUrl={clip.thumbnailUrl || clip.videoUrl || ''}
                               duration={clip.duration}
                               sourceStart={clip.sourceStart}
                               pixelsPerSecond={pixelsPerSecond}
