@@ -1,15 +1,34 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { Mic, Square, Circle, X } from 'lucide-react';
+import {
+  RecordingCompletePayload,
+  RecordingProgressPayload,
+  RecordingStartPayload,
+} from '../types';
 
 interface AudioRecorderProps {
-  onRecordingComplete: (audioUrl: string, duration: number, blob: Blob) => void;
-  onStartRecording?: () => void;
+  onRecordingComplete: (payload: RecordingCompletePayload) => void;
+  onStartRecording?: (payload: RecordingStartPayload) => void;
+  onStopRecording?: () => void;
+  onRecordingProgress?: (payload: RecordingProgressPayload) => void;
+  onRecordingPause?: () => void;
+  onRecordingResume?: () => void;
   onClose?: () => void;
   isActive?: boolean;
   isArmed?: boolean;
 }
 
-export const AudioRecorder: React.FC<AudioRecorderProps> = ({ onRecordingComplete, onStartRecording, onClose, isActive = true, isArmed = true }) => {
+export const AudioRecorder: React.FC<AudioRecorderProps> = ({
+  onRecordingComplete,
+  onStartRecording,
+  onStopRecording,
+  onRecordingProgress,
+  onRecordingPause,
+  onRecordingResume,
+  onClose,
+  isActive = true,
+  isArmed = true,
+}) => {
   const [isRecording, setIsRecording] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
   const [stream, setStream] = useState<MediaStream | null>(null);
@@ -26,11 +45,20 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({ onRecordingComplet
 
   const onRecordingCompleteRef = useRef(onRecordingComplete);
   const onStartRecordingRef = useRef(onStartRecording);
+  const onStopRecordingRef = useRef(onStopRecording);
+  const onRecordingProgressRef = useRef(onRecordingProgress);
+  const onRecordingPauseRef = useRef(onRecordingPause);
+  const onRecordingResumeRef = useRef(onRecordingResume);
+  const partialUrlRef = useRef<string | null>(null);
 
   useEffect(() => {
     onRecordingCompleteRef.current = onRecordingComplete;
     onStartRecordingRef.current = onStartRecording;
-  }, [onRecordingComplete, onStartRecording]);
+    onStopRecordingRef.current = onStopRecording;
+    onRecordingProgressRef.current = onRecordingProgress;
+    onRecordingPauseRef.current = onRecordingPause;
+    onRecordingResumeRef.current = onRecordingResume;
+  }, [onRecordingComplete, onStartRecording, onStopRecording, onRecordingProgress, onRecordingPause, onRecordingResume]);
 
   useEffect(() => {
     async function setupAudio() {
@@ -78,8 +106,27 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({ onRecordingComplet
       if (timerRef.current) clearInterval(timerRef.current);
       if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
       if (audioContextRef.current) audioContextRef.current.close();
+      if (partialUrlRef.current) URL.revokeObjectURL(partialUrlRef.current);
     };
   }, []);
+
+  const getElapsedDuration = () => {
+    if (isRecording) {
+      return accumulatedTimeRef.current + (Date.now() - startTimeRef.current) / 1000;
+    }
+    return accumulatedTimeRef.current;
+  };
+
+  const emitProgress = (blob: Blob) => {
+    if (partialUrlRef.current) URL.revokeObjectURL(partialUrlRef.current);
+    const url = URL.createObjectURL(blob);
+    partialUrlRef.current = url;
+    onRecordingProgressRef.current?.({
+      duration: getElapsedDuration(),
+      source: 'camera',
+      recordings: [{ source: 'camera', url, blob }],
+    });
+  };
 
   const startRecording = () => {
     if (!stream) return;
@@ -96,6 +143,7 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({ onRecordingComplet
     mediaRecorder.ondataavailable = (e) => {
       if (e.data.size > 0) {
         chunksRef.current.push(e.data);
+        emitProgress(new Blob(chunksRef.current, { type: mediaRecorder.mimeType || 'audio/webm' }));
       }
     };
 
@@ -103,17 +151,21 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({ onRecordingComplet
       const mimeType = mediaRecorder.mimeType || 'audio/webm';
       const blob = new Blob(chunksRef.current, { type: mimeType });
       const url = URL.createObjectURL(blob);
-      onRecordingCompleteRef.current(url, accumulatedTimeRef.current, blob);
+      onRecordingCompleteRef.current({
+        duration: accumulatedTimeRef.current,
+        source: 'camera',
+        recordings: [{ source: 'camera', url, blob }],
+      });
     };
 
-    mediaRecorder.start();
+    mediaRecorder.start(500);
     setIsRecording(true);
     setIsPaused(false);
     setRecordingTime(0);
     accumulatedTimeRef.current = 0;
     startTimeRef.current = Date.now();
 
-    if (onStartRecordingRef.current) onStartRecordingRef.current();
+    if (onStartRecordingRef.current) onStartRecordingRef.current({ source: 'camera' });
 
     timerRef.current = window.setInterval(() => {
       const elapsed = (Date.now() - startTimeRef.current) / 1000;
@@ -126,6 +178,7 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({ onRecordingComplet
       if (isRecording) {
         accumulatedTimeRef.current += (Date.now() - startTimeRef.current) / 1000;
       }
+      onStopRecordingRef.current?.();
       mediaRecorderRef.current.stop();
       setIsRecording(false);
       setIsPaused(false);
@@ -140,6 +193,7 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({ onRecordingComplet
       setIsPaused(true);
       setIsRecording(false);
       if (timerRef.current) clearInterval(timerRef.current);
+      onRecordingPauseRef.current?.();
     }
   };
 
@@ -149,6 +203,7 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({ onRecordingComplet
       setIsPaused(false);
       setIsRecording(true);
       startTimeRef.current = Date.now();
+      onRecordingResumeRef.current?.();
 
       timerRef.current = window.setInterval(() => {
         const elapsed = (Date.now() - startTimeRef.current) / 1000;

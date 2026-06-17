@@ -6,6 +6,7 @@ node_modules/
 .npm-cache/
 build/
 dist/
+.tmp/
 release/
 coverage/
 .DS_Store

@@ -38,7 +38,84 @@ describe('desktop export request builder', () => {
     expect(request.assets).toHaveLength(1);
     expect(request.assets[0]?.assetId).toBe('blob:shared');
     expect(request.assets[0]?.buffer).toBeInstanceOf(ArrayBuffer);
+    expect(request.assets[0]?.sourceUrl).toBeUndefined();
     expect(request.clips.map((clip) => clip.assetRef?.assetId)).toEqual(['blob:shared', 'blob:shared']);
+  });
+
+  it('inlines blob URLs when indexed storage is unavailable', async () => {
+    const blob = new Blob(['live-recording'], { type: 'video/webm' });
+
+    vi.spyOn(videoDB, 'getBlob').mockResolvedValue(null);
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      blob: async () => blob,
+    }));
+
+    const request = await buildDesktopExportRequest({
+      clips: [
+        makeClip({
+          id: 3,
+          blobId: 'missing',
+          videoUrl: 'blob:live-recording',
+          timelinePosition: { start: 0, end: 5 },
+        }),
+      ],
+      tracks: [makeTrack()],
+      exportRange: { start: 0, end: 5 },
+      format: 'mp4',
+    });
+
+    expect(fetch).toHaveBeenCalledWith('blob:live-recording');
+    expect(request.assets[0]?.mimeType).toBe('video/webm');
+    expect(request.assets[0]?.buffer).toBeInstanceOf(ArrayBuffer);
+    expect(request.assets[0]?.sourceUrl).toBeUndefined();
+  });
+
+  it('falls back to XMLHttpRequest when fetch rejects for blob URLs', async () => {
+    const blob = new Blob(['live-recording'], { type: 'video/mp4' });
+
+    vi.spyOn(videoDB, 'getBlob').mockResolvedValue(null);
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('Failed to fetch')));
+
+    class MockBlobRequest {
+      responseType = '';
+      response: Blob | null = null;
+      status = 0;
+      statusText = '';
+      onload: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+      onabort: (() => void) | null = null;
+
+      open(_method: string, url: string) {
+        expect(url).toBe('blob:file:///packaged-media');
+      }
+
+      send() {
+        this.response = blob;
+        this.onload?.();
+      }
+    }
+
+    vi.stubGlobal('XMLHttpRequest', MockBlobRequest as unknown as typeof XMLHttpRequest);
+
+    const request = await buildDesktopExportRequest({
+      clips: [
+        makeClip({
+          id: 4,
+          blobId: 'missing',
+          videoUrl: 'blob:file:///packaged-media',
+          timelinePosition: { start: 0, end: 5 },
+        }),
+      ],
+      tracks: [makeTrack()],
+      exportRange: { start: 0, end: 5 },
+      format: 'mp4',
+    });
+
+    expect(fetch).toHaveBeenCalledWith('blob:file:///packaged-media');
+    expect(request.assets[0]?.mimeType).toBe('video/mp4');
+    expect(request.assets[0]?.buffer).toBeInstanceOf(ArrayBuffer);
+    expect(request.assets[0]?.sourceUrl).toBeUndefined();
   });
 });
 
