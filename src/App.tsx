@@ -19,6 +19,11 @@ import {
   splitClipState,
   trimClipState,
 } from './lib/editor-operations';
+import {
+  COMPOSITION_REFERENCE_HEIGHT,
+  COMPOSITION_REFERENCE_WIDTH,
+  getAspectFitRenderMetrics,
+} from './lib/export-shared';
 import { videoDB } from './services/db';
 import {
   Play, Pause, SkipBack, SkipForward, Video, Download, Undo2, Redo2, Radio,
@@ -527,25 +532,33 @@ export default function App() {
             const y1280 = y * scale;
             const w1280 = w * scale;
             const h1280 = h * scale;
+            const crop = {
+              top: cropT,
+              right: cropL,
+              bottom: cropT,
+              left: cropL,
+            };
+            const croppedRenderMetrics = getAspectFitRenderMetrics(
+              camWidth,
+              camHeight,
+              COMPOSITION_REFERENCE_WIDTH,
+              COMPOSITION_REFERENCE_HEIGHT,
+              crop,
+            );
 
             transform = {
               position: {
-                x: (x1280 + w1280 / 2) - 1280 / 2,
-                y: (y1280 + h1280 / 2) - 720 / 2,
+                x: (x1280 + w1280 / 2) - COMPOSITION_REFERENCE_WIDTH / 2,
+                y: (y1280 + h1280 / 2) - COMPOSITION_REFERENCE_HEIGHT / 2,
                 z: 0
               },
               rotation: 0,
               scale: {
-                x: w1280 / 1280,
-                y: h1280 / 720
+                x: croppedRenderMetrics.dw > 0 ? w1280 / croppedRenderMetrics.dw : 1,
+                y: croppedRenderMetrics.dh > 0 ? h1280 / croppedRenderMetrics.dh : 1
               },
               opacity: 1,
-              crop: {
-                top: cropT,
-                right: cropL,
-                bottom: cropT,
-                left: cropL
-              }
+              crop
             };
           }
 
