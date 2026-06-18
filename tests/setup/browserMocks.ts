@@ -119,6 +119,34 @@ export function installBrowserMocks() {
   const mediaDevices = {
     getUserMedia: vi.fn().mockResolvedValue(mediaStream),
     getDisplayMedia: vi.fn().mockResolvedValue(mediaStream),
+    enumerateDevices: vi.fn().mockResolvedValue([
+      {
+        deviceId: 'camera-1',
+        groupId: 'group-camera-1',
+        kind: 'videoinput',
+        label: 'FaceTime Camera',
+      },
+      {
+        deviceId: 'camera-2',
+        groupId: 'group-camera-2',
+        kind: 'videoinput',
+        label: 'USB Camera',
+      },
+      {
+        deviceId: 'mic-1',
+        groupId: 'group-mic-1',
+        kind: 'audioinput',
+        label: 'Built-in Microphone',
+      },
+      {
+        deviceId: 'mic-2',
+        groupId: 'group-mic-2',
+        kind: 'audioinput',
+        label: 'USB Microphone',
+      },
+    ]),
+    addEventListener: vi.fn(),
+    removeEventListener: vi.fn(),
   };
 
   Object.defineProperty(globalThis, 'Worker', {

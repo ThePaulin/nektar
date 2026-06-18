@@ -10,9 +10,15 @@ import {
   TrackType,
 } from '../types';
 import {
+  CameraStreamOptions,
+  DisplaySourceOption,
   describeMediaPermissionError,
+  listDisplaySources,
+  listRecordingDevices,
   MediaAccessStatus,
+  RecordingDeviceOption,
   requestCameraStream,
+  ScreenStreamOptions,
   requestScreenStream,
 } from '../lib/media-permissions';
 
@@ -69,6 +75,12 @@ export const Recorder: React.FC<RecorderProps> = ({
   const partialUrlsRef = useRef<Partial<Record<RecordingSource, string>>>({});
   const livePreviewStreamsRef = useRef<Partial<Record<RecordingSource, MediaStream>>>({});
   const [audioLevel, setAudioLevel] = useState(0);
+  const [cameraDevices, setCameraDevices] = useState<RecordingDeviceOption[]>([]);
+  const [microphoneDevices, setMicrophoneDevices] = useState<RecordingDeviceOption[]>([]);
+  const [displaySources, setDisplaySources] = useState<DisplaySourceOption[]>([]);
+  const [selectedCameraDeviceId, setSelectedCameraDeviceId] = useState('');
+  const [selectedMicrophoneDeviceId, setSelectedMicrophoneDeviceId] = useState('');
+  const [selectedDisplaySourceId, setSelectedDisplaySourceId] = useState('');
   const [screenAccessStatus, setScreenAccessStatus] = useState<MediaAccessStatus>('unknown');
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [microphoneWarning, setMicrophoneWarning] = useState<string | null>(null);
@@ -120,6 +132,30 @@ export const Recorder: React.FC<RecorderProps> = ({
     }
   }, []);
 
+  const stopScreenStream = useCallback(() => {
+    if (!screenStreamRef.current) return;
+    screenStreamRef.current.getTracks().forEach(track => track.stop());
+    screenStreamRef.current = null;
+    setScreenStream(null);
+  }, []);
+
+  const refreshDeviceLists = useCallback(async () => {
+    try {
+      const [{ cameras, microphones }, sources] = await Promise.all([
+        listRecordingDevices(),
+        listDisplaySources(),
+      ]);
+      setCameraDevices(cameras);
+      setMicrophoneDevices(microphones);
+      setDisplaySources(sources);
+      setSelectedCameraDeviceId((current) => current || cameras[0]?.deviceId || '');
+      setSelectedMicrophoneDeviceId((current) => current || microphones[0]?.deviceId || '');
+      setSelectedDisplaySourceId((current) => current || sources[0]?.id || '');
+    } catch (err) {
+      console.error("Error listing recording devices:", err);
+    }
+  }, []);
+
   const refreshScreenAccessStatus = useCallback(async () => {
     const desktopSystem = window.nektarDesktop?.desktopSystem;
     if (!desktopSystem?.getScreenAccessStatus) {
@@ -151,6 +187,14 @@ export const Recorder: React.FC<RecorderProps> = ({
 
     setAudioLevel(0);
   }, []);
+
+  const stopCameraStream = useCallback(() => {
+    if (!cameraStreamRef.current) return;
+    cameraStreamRef.current.getTracks().forEach(track => track.stop());
+    cameraStreamRef.current = null;
+    setCameraStream(null);
+    stopAudioVisualizer();
+  }, [stopAudioVisualizer]);
 
   const startAudioVisualizer = useCallback((stream: MediaStream) => {
     stopAudioVisualizer();
@@ -190,12 +234,15 @@ export const Recorder: React.FC<RecorderProps> = ({
     }
   };
 
-  const setupCamera = async () => {
+  const setupCamera = async (options: CameraStreamOptions = {}) => {
     try {
       setCameraError(null);
       setMicrophoneWarning(null);
 
-      const result = await requestCameraStream();
+      const result = await requestCameraStream({
+        cameraDeviceId: options.cameraDeviceId ?? selectedCameraDeviceId,
+        microphoneDeviceId: options.microphoneDeviceId ?? selectedMicrophoneDeviceId,
+      });
       const stream = result.stream;
       cameraStreamRef.current = stream;
       setCameraStream(stream);
@@ -212,6 +259,7 @@ export const Recorder: React.FC<RecorderProps> = ({
       });
 
       startAudioVisualizer(stream);
+      void refreshDeviceLists();
       return true;
     } catch (err) {
       console.error("Error accessing camera:", err);
@@ -220,7 +268,7 @@ export const Recorder: React.FC<RecorderProps> = ({
     }
   };
 
-  const setupScreen = async () => {
+  const setupScreen = async (options: ScreenStreamOptions = {}) => {
     try {
       const desktopSystem = window.nektarDesktop?.desktopSystem;
       const status = await refreshScreenAccessStatus();
@@ -231,7 +279,9 @@ export const Recorder: React.FC<RecorderProps> = ({
         return false;
       }
 
-      const stream = await requestScreenStream(isMacOS);
+      const stream = await requestScreenStream(isMacOS, {
+        displaySourceId: options.displaySourceId ?? selectedDisplaySourceId,
+      });
 
       setScreenAccessStatus('granted');
       setScreenError(null);
@@ -364,15 +414,24 @@ export const Recorder: React.FC<RecorderProps> = ({
   );
 
   useEffect(() => {
+    void refreshDeviceLists();
     refreshScreenAccessStatus();
 
     const handleWindowFocus = () => {
       void refreshScreenAccessStatus();
+      void refreshDeviceLists();
+    };
+    const handleDeviceChange = () => {
+      void refreshDeviceLists();
     };
 
     window.addEventListener('focus', handleWindowFocus);
-    return () => window.removeEventListener('focus', handleWindowFocus);
-  }, [refreshScreenAccessStatus]);
+    navigator.mediaDevices?.addEventListener?.('devicechange', handleDeviceChange);
+    return () => {
+      window.removeEventListener('focus', handleWindowFocus);
+      navigator.mediaDevices?.removeEventListener?.('devicechange', handleDeviceChange);
+    };
+  }, [refreshDeviceLists, refreshScreenAccessStatus]);
 
   const takePhoto = () => {
     if (!videoRef.current && !screenVideoRef.current && !canvasRef.current) return;
@@ -773,6 +832,39 @@ export const Recorder: React.FC<RecorderProps> = ({
     }
   };
 
+  const handleCameraDeviceChange = (deviceId: string) => {
+    setSelectedCameraDeviceId(deviceId);
+    if (isRecording || isPaused) return;
+    if (!cameraStream || (recordingSource !== 'camera' && recordingSource !== 'overlay')) return;
+
+    stopCameraStream();
+    void setupCamera({ cameraDeviceId: deviceId });
+  };
+
+  const handleMicrophoneDeviceChange = (deviceId: string) => {
+    setSelectedMicrophoneDeviceId(deviceId);
+    if (isRecording || isPaused) return;
+    if (!cameraStream || (recordingSource !== 'camera' && recordingSource !== 'overlay')) return;
+
+    stopCameraStream();
+    void setupCamera({ microphoneDeviceId: deviceId });
+  };
+
+  const handleDisplaySourceChange = (sourceId: string) => {
+    setSelectedDisplaySourceId(sourceId);
+    if (isRecording || isPaused) return;
+    if (!screenStream || (recordingSource !== 'screen' && recordingSource !== 'overlay')) return;
+
+    stopScreenStream();
+    void setupScreen({ displaySourceId: sourceId });
+  };
+
+  const canEditDevices = !isRecording && !isPaused && !isRequestingAccess;
+  const showCameraSelector = recordingSource === 'camera' || recordingSource === 'overlay';
+  const showMicrophoneSelector = recordingSource === 'camera' || recordingSource === 'overlay';
+  const showDisplaySelector = recordingSource === 'screen' || recordingSource === 'overlay';
+  const hasDesktopDisplaySourcePicker = !!window.nektarDesktop?.desktopSystem?.listDisplaySources;
+
   return (
     <div className="relative w-fit h-full max-h-[400px] flex flex-col bg-[#111] border border-white/10 shadow-2xl overflow-hidden rounded-xl min-h-0">
       {/* Video Preview */}
@@ -818,6 +910,83 @@ export const Recorder: React.FC<RecorderProps> = ({
             )}
           </div>
         </div>
+
+        {(showCameraSelector || showMicrophoneSelector || showDisplaySelector) && (
+          <div className="absolute top-11 left-3 right-3 z-[55] flex flex-wrap items-center gap-1.5 pointer-events-auto">
+            {showCameraSelector && (
+              <select
+                aria-label="Camera device"
+                title="Camera device"
+                value={selectedCameraDeviceId}
+                onChange={(event) => handleCameraDeviceChange(event.target.value)}
+                disabled={!canEditDevices}
+                className="min-w-0 max-w-[150px] bg-black/70 border border-white/10 rounded-md px-2 py-1 text-[10px] text-white outline-none disabled:opacity-50"
+              >
+                {cameraDevices.length === 0 ? (
+                  <option value="">Camera</option>
+                ) : (
+                  cameraDevices.map((device) => (
+                    <option key={device.deviceId || device.label} value={device.deviceId}>
+                      {device.label}
+                    </option>
+                  ))
+                )}
+              </select>
+            )}
+            {showMicrophoneSelector && (
+              <select
+                aria-label="Microphone device"
+                title="Microphone device"
+                value={selectedMicrophoneDeviceId}
+                onChange={(event) => handleMicrophoneDeviceChange(event.target.value)}
+                disabled={!canEditDevices}
+                className="min-w-0 max-w-[160px] bg-black/70 border border-white/10 rounded-md px-2 py-1 text-[10px] text-white outline-none disabled:opacity-50"
+              >
+                {microphoneDevices.length === 0 ? (
+                  <option value="">Microphone</option>
+                ) : (
+                  microphoneDevices.map((device) => (
+                    <option key={device.deviceId || device.label} value={device.deviceId}>
+                      {device.label}
+                    </option>
+                  ))
+                )}
+              </select>
+            )}
+            {showDisplaySelector && hasDesktopDisplaySourcePicker && (
+              <select
+                aria-label="Screen source"
+                title="Screen source"
+                value={selectedDisplaySourceId}
+                onChange={(event) => handleDisplaySourceChange(event.target.value)}
+                disabled={!canEditDevices}
+                className="min-w-0 max-w-[180px] bg-black/70 border border-white/10 rounded-md px-2 py-1 text-[10px] text-white outline-none disabled:opacity-50"
+              >
+                {displaySources.length === 0 ? (
+                  <option value="">Screen/window</option>
+                ) : (
+                  displaySources.map((source) => (
+                    <option key={source.id} value={source.id}>
+                      {source.name}
+                    </option>
+                  ))
+                )}
+              </select>
+            )}
+            {showDisplaySelector && !hasDesktopDisplaySourcePicker && (
+              <button
+                type="button"
+                onClick={() => {
+                  void setupScreen();
+                }}
+                disabled={!canEditDevices}
+                className="bg-black/70 border border-white/10 rounded-md px-2 py-1 text-[10px] text-white transition-colors hover:bg-white/10 disabled:opacity-50"
+              >
+                Choose screen/window/tab...
+              </button>
+            )}
+          </div>
+        )}
 
         {/* Hidden Canvas for Composition */}
         <canvas ref={canvasRef} className="hidden" />

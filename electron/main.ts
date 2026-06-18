@@ -28,7 +28,10 @@ const { app, BrowserWindow, desktopCapturer, dialog, ipcMain, session, shell, sy
     getAllWindows(): Array<unknown>;
   };
   desktopCapturer: {
-    getSources(options: { types: Array<'screen' | 'window'> }): Promise<Array<{ id: string; name: string }>>;
+    getSources(options: {
+      types: Array<'screen' | 'window'>;
+      thumbnailSize?: { width: number; height: number };
+    }): Promise<Array<{ id: string; name: string }>>;
   };
   dialog: {
     showSaveDialog(window: unknown, options: { defaultPath: string }): Promise<{ canceled: boolean; filePath?: string }>;
@@ -84,6 +87,7 @@ const rendererUrl = process.env.ELECTRON_RENDERER_URL || 'http://localhost:3000'
 const macScreenRecordingSettingsUrl =
   'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture';
 const capturablePermissions = new Set(['media', 'display-capture']);
+let selectedDisplaySourceId: string | null = null;
 
 function isTrustedRendererUrl(url: string | undefined) {
   if (!url) return false;
@@ -111,6 +115,22 @@ function isTrustedPermissionRequest(
   );
 }
 
+async function canLoadRendererDevUrl() {
+  try {
+    const response = await fetch(rendererUrl, { method: 'GET' });
+    if (!response.ok) return false;
+
+    const contentType = response.headers.get('content-type') || '';
+    if (contentType.includes('text/html')) return true;
+
+    const bodyStart = (await response.text()).trimStart().slice(0, 32).toLowerCase();
+    return bodyStart.startsWith('<!doctype html') || bodyStart.startsWith('<html');
+  } catch (error) {
+    console.warn(`[Desktop] Renderer dev URL unavailable, falling back to built dist: ${String(error)}`);
+    return false;
+  }
+}
+
 async function createWindow() {
   const win = new BrowserWindow({
     width: 1440,
@@ -125,7 +145,7 @@ async function createWindow() {
     },
   });
 
-  if (isDevelopment) {
+  if (isDevelopment && await canLoadRendererDevUrl()) {
     await win.loadURL(rendererUrl);
   } else {
     await win.loadFile(resolveAppFile('dist', 'index.html'));
@@ -144,10 +164,13 @@ app.whenReady().then(async () => {
   session.defaultSession.setDisplayMediaRequestHandler(
     async (_request, callback) => {
       const sources = await desktopCapturer.getSources({ types: ['screen', 'window'] });
-      const primarySource = sources[0];
-      callback(primarySource ? { video: primarySource } : {});
+      const requestedSource = selectedDisplaySourceId
+        ? sources.find((source) => source.id === selectedDisplaySourceId)
+        : null;
+      const source = requestedSource ?? sources[0];
+      callback(source ? { video: source } : {});
     },
-    { useSystemPicker: true },
+    { useSystemPicker: false },
   );
 
   ipcMain.handle('desktop-export:is-available', () => isFfmpegAvailable());
@@ -193,6 +216,20 @@ app.whenReady().then(async () => {
 
     await shell.openExternal(macScreenRecordingSettingsUrl);
     return true;
+  });
+  ipcMain.handle('desktop-system:list-display-sources', async () => {
+    const sources = await desktopCapturer.getSources({
+      types: ['screen', 'window'],
+      thumbnailSize: { width: 0, height: 0 },
+    });
+
+    return sources.map((source) => ({
+      id: source.id,
+      name: source.name,
+    }));
+  });
+  ipcMain.handle('desktop-system:set-display-source', (_event: unknown, sourceId: string | null) => {
+    selectedDisplaySourceId = sourceId || null;
   });
   ipcMain.handle('desktop-export:copy-result', async (_event: unknown, jobId: string, targetPath: string) => {
     return copyDesktopExportResult(jobId, targetPath);

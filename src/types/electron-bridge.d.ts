@@ -21,6 +21,8 @@ declare global {
         getMediaAccessStatus?(mediaType: 'camera' | 'microphone' | 'screen'): Promise<'not-determined' | 'granted' | 'denied' | 'restricted' | 'unknown'>;
         requestMediaAccess?(mediaType: 'camera' | 'microphone'): Promise<boolean>;
         openScreenRecordingSettings(): Promise<boolean>;
+        listDisplaySources?(): Promise<Array<{ id: string; name: string }>>;
+        setDisplaySource?(sourceId: string | null): Promise<void>;
       };
     };
   }

@@ -1,10 +1,35 @@
 export type MediaAccessStatus = 'not-determined' | 'granted' | 'denied' | 'restricted' | 'unknown';
 export type MediaPermissionKind = 'camera' | 'microphone' | 'screen';
 
+export interface RecordingDeviceOption {
+  deviceId: string;
+  groupId: string;
+  kind: 'audioinput' | 'videoinput';
+  label: string;
+}
+
+export interface DisplaySourceOption {
+  id: string;
+  name: string;
+}
+
 export interface CameraStreamResult {
   stream: MediaStream;
   microphoneAvailable: boolean;
   audioWarning: string | null;
+}
+
+export interface CameraStreamOptions {
+  cameraDeviceId?: string | null;
+  microphoneDeviceId?: string | null;
+}
+
+export interface MicrophoneStreamOptions {
+  microphoneDeviceId?: string | null;
+}
+
+export interface ScreenStreamOptions {
+  displaySourceId?: string | null;
 }
 
 const CAMERA_CONSTRAINTS: MediaTrackConstraints = {
@@ -17,6 +42,17 @@ const MICROPHONE_CONSTRAINTS: MediaTrackConstraints = {
   noiseSuppression: true,
   autoGainControl: true,
 };
+
+function withDeviceId(
+  constraints: MediaTrackConstraints,
+  deviceId?: string | null,
+): MediaTrackConstraints {
+  if (!deviceId) return constraints;
+  return {
+    ...constraints,
+    deviceId: { exact: deviceId },
+  };
+}
 
 function getUserMediaDevices() {
   if (!navigator.mediaDevices?.getUserMedia) {
@@ -85,6 +121,40 @@ function stopStream(stream: MediaStream) {
   stream.getTracks().forEach((track) => track.stop());
 }
 
+export async function listRecordingDevices(): Promise<{
+  cameras: RecordingDeviceOption[];
+  microphones: RecordingDeviceOption[];
+}> {
+  const mediaDevices = getUserMediaDevices();
+
+  if (!mediaDevices.enumerateDevices) {
+    return { cameras: [], microphones: [] };
+  }
+
+  const devices = await mediaDevices.enumerateDevices();
+  const cameraDevices = devices.filter((device) => device.kind === 'videoinput');
+  const microphoneDevices = devices.filter((device) => device.kind === 'audioinput');
+
+  return {
+    cameras: cameraDevices.map((device, index) => ({
+      deviceId: device.deviceId,
+      groupId: device.groupId,
+      kind: 'videoinput',
+      label: device.label || `Camera ${index + 1}`,
+    })),
+    microphones: microphoneDevices.map((device, index) => ({
+      deviceId: device.deviceId,
+      groupId: device.groupId,
+      kind: 'audioinput',
+      label: device.label || `Microphone ${index + 1}`,
+    })),
+  };
+}
+
+export async function listDisplaySources(): Promise<DisplaySourceOption[]> {
+  return window.nektarDesktop?.desktopSystem?.listDisplaySources?.() ?? [];
+}
+
 async function ensureDesktopMediaAccess(kind: 'camera' | 'microphone') {
   const desktopSystem = window.nektarDesktop?.desktopSystem;
   if (!desktopSystem?.requestMediaAccess) return;
@@ -102,55 +172,64 @@ async function ensureDesktopMediaAccess(kind: 'camera' | 'microphone') {
   }
 }
 
-export async function requestCameraStream(): Promise<CameraStreamResult> {
+export async function requestCameraStream(options: CameraStreamOptions = {}): Promise<CameraStreamResult> {
   const mediaDevices = getUserMediaDevices();
+  let videoStream: MediaStream | null = null;
 
   try {
     await ensureDesktopMediaAccess('camera');
-    await ensureDesktopMediaAccess('microphone');
+    videoStream = await mediaDevices.getUserMedia({
+      video: withDeviceId(CAMERA_CONSTRAINTS, options.cameraDeviceId),
+      audio: false,
+    });
+  } catch (error) {
+    if (videoStream) stopStream(videoStream);
+    throw error;
+  }
 
-    const stream = await mediaDevices.getUserMedia({
-      video: CAMERA_CONSTRAINTS,
-      audio: MICROPHONE_CONSTRAINTS,
+  if (videoStream.getVideoTracks().length === 0) {
+    stopStream(videoStream);
+    throw new Error('No video track was returned for the selected camera source.');
+  }
+
+  try {
+    await ensureDesktopMediaAccess('microphone');
+    const audioStream = await mediaDevices.getUserMedia({
+      video: false,
+      audio: withDeviceId(MICROPHONE_CONSTRAINTS, options.microphoneDeviceId),
     });
 
+    const audioTracks = audioStream.getAudioTracks();
+    if (audioTracks.length === 0) {
+      stopStream(audioStream);
+      return {
+        stream: videoStream,
+        microphoneAvailable: false,
+        audioWarning: 'Camera access is ready, but no microphone track was provided.',
+      };
+    }
+
+    audioTracks.forEach((track) => videoStream.addTrack(track));
     return {
-      stream,
-      microphoneAvailable: stream.getAudioTracks().length > 0,
-      audioWarning: stream.getAudioTracks().length > 0 ? null : 'Camera access is ready, but no microphone track was provided.',
+      stream: videoStream,
+      microphoneAvailable: true,
+      audioWarning: null,
     };
   } catch (error) {
-    let videoOnlyStream: MediaStream | null = null;
-
-    try {
-      await ensureDesktopMediaAccess('camera');
-      videoOnlyStream = await mediaDevices.getUserMedia({
-        video: CAMERA_CONSTRAINTS,
-        audio: false,
-      });
-    } catch {
-      throw error;
-    }
-
-    if (videoOnlyStream.getVideoTracks().length === 0) {
-      stopStream(videoOnlyStream);
-      throw new Error('No video track was returned for the selected camera source.');
-    }
-
     return {
-      stream: videoOnlyStream,
+      stream: videoStream,
       microphoneAvailable: false,
       audioWarning: describeMediaPermissionError(error, 'microphone'),
     };
   }
 }
 
-export async function requestMicrophoneStream() {
+export async function requestMicrophoneStream(options: MicrophoneStreamOptions = {}) {
   const mediaDevices = getUserMediaDevices();
   await ensureDesktopMediaAccess('microphone');
 
   const stream = await mediaDevices.getUserMedia({
-    audio: MICROPHONE_CONSTRAINTS,
+    audio: withDeviceId(MICROPHONE_CONSTRAINTS, options.microphoneDeviceId),
     video: false,
   });
 
@@ -162,8 +241,10 @@ export async function requestMicrophoneStream() {
   return stream;
 }
 
-export async function requestScreenStream(isMacOS: boolean) {
+export async function requestScreenStream(isMacOS: boolean, options: ScreenStreamOptions = {}) {
   const mediaDevices = getDisplayMediaDevices();
+  await window.nektarDesktop?.desktopSystem?.setDisplaySource?.(options.displaySourceId ?? null);
+
   const constraints: DisplayMediaStreamOptions = {
     video: {
       cursor: 'always',

@@ -20,5 +20,7 @@ contextBridge.exposeInMainWorld('nektarDesktop', {
         getMediaAccessStatus: (mediaType) => ipcRenderer.invoke('desktop-system:get-media-access-status', mediaType),
         requestMediaAccess: (mediaType) => ipcRenderer.invoke('desktop-system:request-media-access', mediaType),
         openScreenRecordingSettings: () => ipcRenderer.invoke('desktop-system:open-screen-recording-settings'),
+        listDisplaySources: () => ipcRenderer.invoke('desktop-system:list-display-sources'),
+        setDisplaySource: (sourceId) => ipcRenderer.invoke('desktop-system:set-display-source', sourceId),
     },
 });

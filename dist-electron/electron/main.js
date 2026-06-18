@@ -13,6 +13,7 @@ const isDevelopment = !app.isPackaged;
 const rendererUrl = process.env.ELECTRON_RENDERER_URL || 'http://localhost:3000';
 const macScreenRecordingSettingsUrl = 'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture';
 const capturablePermissions = new Set(['media', 'display-capture']);
+let selectedDisplaySourceId = null;
 function isTrustedRendererUrl(url) {
     if (!url)
         return false;
@@ -33,6 +34,22 @@ function isTrustedPermissionRequest(webContents, permission, details = {}) {
         isTrustedRendererUrl(details.embeddingOrigin) ||
         isTrustedRendererUrl(webContents?.getURL()));
 }
+async function canLoadRendererDevUrl() {
+    try {
+        const response = await fetch(rendererUrl, { method: 'GET' });
+        if (!response.ok)
+            return false;
+        const contentType = response.headers.get('content-type') || '';
+        if (contentType.includes('text/html'))
+            return true;
+        const bodyStart = (await response.text()).trimStart().slice(0, 32).toLowerCase();
+        return bodyStart.startsWith('<!doctype html') || bodyStart.startsWith('<html');
+    }
+    catch (error) {
+        console.warn(`[Desktop] Renderer dev URL unavailable, falling back to built dist: ${String(error)}`);
+        return false;
+    }
+}
 async function createWindow() {
     const win = new BrowserWindow({
         width: 1440,
@@ -46,7 +63,7 @@ async function createWindow() {
             nodeIntegration: false,
         },
     });
-    if (isDevelopment) {
+    if (isDevelopment && await canLoadRendererDevUrl()) {
         await win.loadURL(rendererUrl);
     }
     else {
@@ -63,9 +80,12 @@ app.whenReady().then(async () => {
     });
     session.defaultSession.setDisplayMediaRequestHandler(async (_request, callback) => {
         const sources = await desktopCapturer.getSources({ types: ['screen', 'window'] });
-        const primarySource = sources[0];
-        callback(primarySource ? { video: primarySource } : {});
-    }, { useSystemPicker: true });
+        const requestedSource = selectedDisplaySourceId
+            ? sources.find((source) => source.id === selectedDisplaySourceId)
+            : null;
+        const source = requestedSource ?? sources[0];
+        callback(source ? { video: source } : {});
+    }, { useSystemPicker: false });
     ipcMain.handle('desktop-export:is-available', () => isFfmpegAvailable());
     ipcMain.handle('desktop-export:start', async (_event, request) => {
         const focusedWindow = BrowserWindow.getFocusedWindow();
@@ -106,6 +126,19 @@ app.whenReady().then(async () => {
         }
         await shell.openExternal(macScreenRecordingSettingsUrl);
         return true;
+    });
+    ipcMain.handle('desktop-system:list-display-sources', async () => {
+        const sources = await desktopCapturer.getSources({
+            types: ['screen', 'window'],
+            thumbnailSize: { width: 0, height: 0 },
+        });
+        return sources.map((source) => ({
+            id: source.id,
+            name: source.name,
+        }));
+    });
+    ipcMain.handle('desktop-system:set-display-source', (_event, sourceId) => {
+        selectedDisplaySourceId = sourceId || null;
     });
     ipcMain.handle('desktop-export:copy-result', async (_event, jobId, targetPath) => {
         return copyDesktopExportResult(jobId, targetPath);

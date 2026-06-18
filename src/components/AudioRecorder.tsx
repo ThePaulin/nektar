@@ -5,7 +5,13 @@ import {
   RecordingProgressPayload,
   RecordingStartPayload,
 } from '../types';
-import { describeMediaPermissionError, requestMicrophoneStream } from '../lib/media-permissions';
+import {
+  describeMediaPermissionError,
+  listRecordingDevices,
+  MicrophoneStreamOptions,
+  RecordingDeviceOption,
+  requestMicrophoneStream,
+} from '../lib/media-permissions';
 
 interface AudioRecorderProps {
   onRecordingComplete: (payload: RecordingCompletePayload) => void;
@@ -44,6 +50,8 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({
   const analyserRef = useRef<AnalyserNode | null>(null);
   const animationFrameRef = useRef<number | null>(null);
   const [audioLevel, setAudioLevel] = useState(0);
+  const [microphoneDevices, setMicrophoneDevices] = useState<RecordingDeviceOption[]>([]);
+  const [selectedMicrophoneDeviceId, setSelectedMicrophoneDeviceId] = useState('');
   const [permissionError, setPermissionError] = useState<string | null>(null);
   const [isRequestingAccess, setIsRequestingAccess] = useState(false);
 
@@ -104,12 +112,32 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({
     updateVisualizer();
   };
 
-  const setupAudio = async () => {
+  const refreshDeviceList = async () => {
+    try {
+      const { microphones } = await listRecordingDevices();
+      setMicrophoneDevices(microphones);
+      setSelectedMicrophoneDeviceId((current) => current || microphones[0]?.deviceId || '');
+    } catch (err) {
+      console.error("Error listing microphone devices:", err);
+    }
+  };
+
+  const stopStream = () => {
+    if (!streamRef.current) return;
+    streamRef.current.getTracks().forEach(track => track.stop());
+    streamRef.current = null;
+    setStream(null);
+    stopAudioVisualizer();
+  };
+
+  const setupAudio = async (options: MicrophoneStreamOptions = {}) => {
     setIsRequestingAccess(true);
     setPermissionError(null);
 
     try {
-      const mediaStream = await requestMicrophoneStream();
+      const mediaStream = await requestMicrophoneStream({
+        microphoneDeviceId: options.microphoneDeviceId ?? selectedMicrophoneDeviceId,
+      });
       streamRef.current = mediaStream;
       setStream(mediaStream);
       mediaStream.getAudioTracks()[0]?.addEventListener('ended', () => {
@@ -118,6 +146,7 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({
         stopAudioVisualizer();
       });
       startAudioVisualizer(mediaStream);
+      void refreshDeviceList();
       return true;
     } catch (err) {
       console.error("Error accessing microphone:", err);
@@ -129,13 +158,16 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({
   };
 
   useEffect(() => {
+    void refreshDeviceList();
+    const handleDeviceChange = () => {
+      void refreshDeviceList();
+    };
+    navigator.mediaDevices?.addEventListener?.('devicechange', handleDeviceChange);
+
     return () => {
-      if (streamRef.current) {
-        streamRef.current.getTracks().forEach(track => track.stop());
-        streamRef.current = null;
-      }
+      navigator.mediaDevices?.removeEventListener?.('devicechange', handleDeviceChange);
+      stopStream();
       if (timerRef.current) clearInterval(timerRef.current);
-      stopAudioVisualizer();
       if (partialUrlRef.current) URL.revokeObjectURL(partialUrlRef.current);
     };
   }, []);
@@ -270,6 +302,16 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({
     return `${mins}:${secs.toString().padStart(2, '0')}`;
   };
 
+  const handleMicrophoneDeviceChange = (deviceId: string) => {
+    setSelectedMicrophoneDeviceId(deviceId);
+    if (isRecording || isPaused || !stream) return;
+
+    stopStream();
+    void setupAudio({ microphoneDeviceId: deviceId });
+  };
+
+  const canEditDevices = !isRecording && !isPaused && !isRequestingAccess;
+
   return (
     <div className="relative aspect-video w-fit h-full aspect-video flex flex-col bg-[#111] overflow-hidden border border-white/10 shadow-2xl rounded-xl min-h-0">
       {/* Header */}
@@ -280,11 +322,31 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({
             {isRecording ? 'Recording Audio' : 'Audio'}
           </span>
         </div>
-        {onClose && (
-          <button onClick={onClose} className="p-1 hover:bg-white/10 rounded-full transition-colors">
-            <X size={14} />
-          </button>
-        )}
+        <div className="flex items-center gap-2">
+          <select
+            aria-label="Microphone device"
+            title="Microphone device"
+            value={selectedMicrophoneDeviceId}
+            onChange={(event) => handleMicrophoneDeviceChange(event.target.value)}
+            disabled={!canEditDevices}
+            className="min-w-0 max-w-[180px] bg-black/70 border border-white/10 rounded-md px-2 py-1 text-[10px] text-white outline-none disabled:opacity-50"
+          >
+            {microphoneDevices.length === 0 ? (
+              <option value="">Microphone</option>
+            ) : (
+              microphoneDevices.map((device) => (
+                <option key={device.deviceId || device.label} value={device.deviceId}>
+                  {device.label}
+                </option>
+              ))
+            )}
+          </select>
+          {onClose && (
+            <button onClick={onClose} className="p-1 hover:bg-white/10 rounded-full transition-colors">
+              <X size={14} />
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Audio Visualizer Area */}
