@@ -17,6 +17,8 @@ contextBridge.exposeInMainWorld('nektarDesktop', {
     desktopSystem: {
         pickSavePath: (defaultPath) => ipcRenderer.invoke('desktop-system:pick-save-path', defaultPath),
         getScreenAccessStatus: () => ipcRenderer.invoke('desktop-system:get-screen-access-status'),
+        getMediaAccessStatus: (mediaType) => ipcRenderer.invoke('desktop-system:get-media-access-status', mediaType),
+        requestMediaAccess: (mediaType) => ipcRenderer.invoke('desktop-system:request-media-access', mediaType),
         openScreenRecordingSettings: () => ipcRenderer.invoke('desktop-system:open-screen-recording-settings'),
     },
 });

@@ -73,7 +73,43 @@ export function installBrowserMocks() {
     }
   }
 
-  const mediaTrack = { stop: noop };
+  class MockAudioContext {
+    state = 'running';
+
+    createMediaStreamSource() {
+      return {
+        connect: noop,
+      };
+    }
+
+    createAnalyser() {
+      return {
+        fftSize: 256,
+        frequencyBinCount: 128,
+        getByteFrequencyData: (data: Uint8Array) => data.fill(0),
+      };
+    }
+
+    createMediaStreamDestination() {
+      return {
+        stream: mediaStream,
+      };
+    }
+
+    resume() {
+      return Promise.resolve();
+    }
+
+    close() {
+      return Promise.resolve();
+    }
+  }
+
+  const mediaTrack = {
+    addEventListener: noop,
+    removeEventListener: noop,
+    stop: noop,
+  };
   const mediaStream = {
     getTracks: () => [mediaTrack],
     getAudioTracks: () => [mediaTrack],
@@ -97,6 +133,12 @@ export function installBrowserMocks() {
     value: MockMediaRecorder,
   });
 
+  Object.defineProperty(globalThis, 'AudioContext', {
+    configurable: true,
+    writable: true,
+    value: MockAudioContext,
+  });
+
   Object.defineProperty(globalThis.navigator, 'mediaDevices', {
     configurable: true,
     value: mediaDevices,
@@ -118,6 +160,12 @@ export function installBrowserMocks() {
     configurable: true,
     writable: true,
     value: vi.fn(),
+  });
+
+  Object.defineProperty(HTMLMediaElement.prototype, 'play', {
+    configurable: true,
+    writable: true,
+    value: vi.fn().mockResolvedValue(undefined),
   });
 
   Object.defineProperty(window, 'ResizeObserver', {

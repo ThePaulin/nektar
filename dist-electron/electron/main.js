@@ -12,6 +12,27 @@ function resolveAppFile(...segments) {
 const isDevelopment = !app.isPackaged;
 const rendererUrl = process.env.ELECTRON_RENDERER_URL || 'http://localhost:3000';
 const macScreenRecordingSettingsUrl = 'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture';
+const capturablePermissions = new Set(['media', 'display-capture']);
+function isTrustedRendererUrl(url) {
+    if (!url)
+        return false;
+    try {
+        const parsed = new URL(url);
+        if (parsed.protocol === 'file:')
+            return !isDevelopment;
+        return parsed.origin === new URL(rendererUrl).origin;
+    }
+    catch {
+        return false;
+    }
+}
+function isTrustedPermissionRequest(webContents, permission, details = {}) {
+    if (!capturablePermissions.has(permission))
+        return false;
+    return (isTrustedRendererUrl(details.requestingUrl) ||
+        isTrustedRendererUrl(details.embeddingOrigin) ||
+        isTrustedRendererUrl(webContents?.getURL()));
+}
 async function createWindow() {
     const win = new BrowserWindow({
         width: 1440,
@@ -34,8 +55,14 @@ async function createWindow() {
 }
 app.whenReady().then(async () => {
     await cleanupStaleDesktopExports();
+    session.defaultSession.setPermissionRequestHandler((webContents, permission, callback, details) => {
+        callback(isTrustedPermissionRequest(webContents, permission, details));
+    });
+    session.defaultSession.setPermissionCheckHandler((webContents, permission, _requestingOrigin, details) => {
+        return isTrustedPermissionRequest(webContents, permission, details);
+    });
     session.defaultSession.setDisplayMediaRequestHandler(async (_request, callback) => {
-        const sources = await desktopCapturer.getSources({ types: ['screen'] });
+        const sources = await desktopCapturer.getSources({ types: ['screen', 'window'] });
         const primarySource = sources[0];
         callback(primarySource ? { video: primarySource } : {});
     }, { useSystemPicker: true });
@@ -62,6 +89,16 @@ app.whenReady().then(async () => {
             return 'unknown';
         }
         return systemPreferences.getMediaAccessStatus('screen');
+    });
+    ipcMain.handle('desktop-system:get-media-access-status', (_event, mediaType) => {
+        return systemPreferences.getMediaAccessStatus(mediaType);
+    });
+    ipcMain.handle('desktop-system:request-media-access', async (_event, mediaType) => {
+        if (process.platform !== 'darwin') {
+            const status = systemPreferences.getMediaAccessStatus(mediaType);
+            return status !== 'denied' && status !== 'restricted';
+        }
+        return systemPreferences.askForMediaAccess(mediaType);
     });
     ipcMain.handle('desktop-system:open-screen-recording-settings', async () => {
         if (process.platform !== 'darwin') {

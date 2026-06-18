@@ -9,6 +9,12 @@ import {
   RecordingStartPayload,
   TrackType,
 } from '../types';
+import {
+  describeMediaPermissionError,
+  MediaAccessStatus,
+  requestCameraStream,
+  requestScreenStream,
+} from '../lib/media-permissions';
 
 interface RecorderProps {
   onRecordingComplete: (payload: RecordingCompletePayload) => void;
@@ -25,7 +31,6 @@ interface RecorderProps {
 
 type OverlayX = 'left' | 'right';
 type OverlayY = 'top' | 'center' | 'bottom';
-type ScreenAccessStatus = 'not-determined' | 'granted' | 'denied' | 'restricted' | 'unknown';
 
 export const Recorder: React.FC<RecorderProps> = ({
   onRecordingComplete,
@@ -43,6 +48,8 @@ export const Recorder: React.FC<RecorderProps> = ({
   const [isPaused, setIsPaused] = useState(false);
   const [cameraStream, setCameraStream] = useState<MediaStream | null>(null);
   const [screenStream, setScreenStream] = useState<MediaStream | null>(null);
+  const cameraStreamRef = useRef<MediaStream | null>(null);
+  const screenStreamRef = useRef<MediaStream | null>(null);
   const [recordingSource, setRecordingSource] = useState<RecordingSource>(trackType === TrackType.SCREEN ? 'screen' : 'camera');
   const [overlayX, setOverlayX] = useState<OverlayX>('right');
   const [overlayY, setOverlayY] = useState<OverlayY>('bottom');
@@ -62,8 +69,11 @@ export const Recorder: React.FC<RecorderProps> = ({
   const partialUrlsRef = useRef<Partial<Record<RecordingSource, string>>>({});
   const livePreviewStreamsRef = useRef<Partial<Record<RecordingSource, MediaStream>>>({});
   const [audioLevel, setAudioLevel] = useState(0);
-  const [screenAccessStatus, setScreenAccessStatus] = useState<ScreenAccessStatus>('unknown');
+  const [screenAccessStatus, setScreenAccessStatus] = useState<MediaAccessStatus>('unknown');
+  const [cameraError, setCameraError] = useState<string | null>(null);
+  const [microphoneWarning, setMicrophoneWarning] = useState<string | null>(null);
   const [screenError, setScreenError] = useState<string | null>(null);
+  const [isRequestingAccess, setIsRequestingAccess] = useState(false);
   const isMacOS = /mac/i.test(navigator.userAgent);
 
   const onRecordingCompleteRef = useRef(onRecordingComplete);
@@ -82,6 +92,14 @@ export const Recorder: React.FC<RecorderProps> = ({
     onRecordingResumeRef.current = onRecordingResume;
   }, [onRecordingComplete, onStartRecording, onStopRecording, onRecordingProgress, onRecordingPause, onRecordingResume]);
 
+  useEffect(() => {
+    cameraStreamRef.current = cameraStream;
+  }, [cameraStream]);
+
+  useEffect(() => {
+    screenStreamRef.current = screenStream;
+  }, [screenStream]);
+
   const revokePartialUrls = useCallback(() => {
     (Object.values(partialUrlsRef.current) as Array<string | undefined>).forEach((url) => {
       if (url) URL.revokeObjectURL(url);
@@ -90,20 +108,22 @@ export const Recorder: React.FC<RecorderProps> = ({
   }, []);
 
   const stopStreams = useCallback(() => {
-    if (cameraStream) {
-      cameraStream.getTracks().forEach(track => track.stop());
+    if (cameraStreamRef.current) {
+      cameraStreamRef.current.getTracks().forEach(track => track.stop());
+      cameraStreamRef.current = null;
       setCameraStream(null);
     }
-    if (screenStream) {
-      screenStream.getTracks().forEach(track => track.stop());
+    if (screenStreamRef.current) {
+      screenStreamRef.current.getTracks().forEach(track => track.stop());
+      screenStreamRef.current = null;
       setScreenStream(null);
     }
-  }, [cameraStream, screenStream]);
+  }, []);
 
   const refreshScreenAccessStatus = useCallback(async () => {
     const desktopSystem = window.nektarDesktop?.desktopSystem;
     if (!desktopSystem?.getScreenAccessStatus) {
-      return 'unknown' as ScreenAccessStatus;
+      return 'unknown' as MediaAccessStatus;
     }
 
     try {
@@ -112,46 +132,91 @@ export const Recorder: React.FC<RecorderProps> = ({
       return status;
     } catch (err) {
       console.error("Error checking screen access status:", err);
-      return 'unknown' as ScreenAccessStatus;
+      return 'unknown' as MediaAccessStatus;
     }
   }, []);
 
+  const stopAudioVisualizer = useCallback(() => {
+    if (animationFrameRef.current) {
+      cancelAnimationFrame(animationFrameRef.current);
+      animationFrameRef.current = null;
+    }
+
+    analyserRef.current = null;
+
+    if (audioContextRef.current) {
+      void audioContextRef.current.close();
+      audioContextRef.current = null;
+    }
+
+    setAudioLevel(0);
+  }, []);
+
+  const startAudioVisualizer = useCallback((stream: MediaStream) => {
+    stopAudioVisualizer();
+
+    if (stream.getAudioTracks().length === 0) {
+      return;
+    }
+
+    const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+    const source = audioContext.createMediaStreamSource(stream);
+    const analyser = audioContext.createAnalyser();
+    analyser.fftSize = 256;
+    source.connect(analyser);
+
+    audioContextRef.current = audioContext;
+    analyserRef.current = analyser;
+
+    const updateVisualizer = () => {
+      if (analyserRef.current) {
+        const dataArray = new Uint8Array(analyserRef.current.frequencyBinCount);
+        analyserRef.current.getByteFrequencyData(dataArray);
+        const average = dataArray.reduce((a, b) => a + b) / dataArray.length;
+        setAudioLevel(average / 128);
+      }
+      animationFrameRef.current = requestAnimationFrame(updateVisualizer);
+    };
+    updateVisualizer();
+  }, [stopAudioVisualizer]);
+
+  const playPreview = async (video: HTMLVideoElement | null) => {
+    if (!video) return;
+
+    try {
+      await video.play();
+    } catch {
+      // Muted local previews can still fail in headless tests or unfocused tabs.
+    }
+  };
+
   const setupCamera = async () => {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { width: 1280, height: 720 },
-        audio: true
-      });
+      setCameraError(null);
+      setMicrophoneWarning(null);
+
+      const result = await requestCameraStream();
+      const stream = result.stream;
+      cameraStreamRef.current = stream;
       setCameraStream(stream);
+      setMicrophoneWarning(result.audioWarning);
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
+        await playPreview(videoRef.current);
       }
 
-      // Setup visualizer
-      if (!audioContextRef.current) {
-        const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
-        const source = audioContext.createMediaStreamSource(stream);
-        const analyser = audioContext.createAnalyser();
-        analyser.fftSize = 256;
-        source.connect(analyser);
+      stream.getVideoTracks()[0]?.addEventListener('ended', () => {
+        cameraStreamRef.current = null;
+        setCameraStream(null);
+        stopAudioVisualizer();
+      });
 
-        audioContextRef.current = audioContext;
-        analyserRef.current = analyser;
-
-        const updateVisualizer = () => {
-          if (analyserRef.current) {
-            const dataArray = new Uint8Array(analyserRef.current.frequencyBinCount);
-            analyserRef.current.getByteFrequencyData(dataArray);
-            const average = dataArray.reduce((a, b) => a + b) / dataArray.length;
-            setAudioLevel(average / 128);
-          }
-          animationFrameRef.current = requestAnimationFrame(updateVisualizer);
-        };
-        updateVisualizer();
-      }
+      startAudioVisualizer(stream);
+      return true;
     } catch (err) {
       console.error("Error accessing camera:", err);
-      alert("Could not access camera. Please ensure permissions are granted.");
+      setCameraError(describeMediaPermissionError(err, 'camera'));
+      return false;
     }
   };
 
@@ -163,61 +228,35 @@ export const Recorder: React.FC<RecorderProps> = ({
 
       if ((status === 'denied' || status === 'restricted') && desktopSystem?.openScreenRecordingSettings) {
         await desktopSystem.openScreenRecordingSettings();
-        return;
+        return false;
       }
 
-      const constraints: DisplayMediaStreamOptions = {
-        video: { 
-          cursor: "always",
-          displaySurface: "browser"
-        },
-        audio: isMacOS ? false : {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true
-        }
-      };
-      let stream: MediaStream;
-
-      try {
-        stream = await navigator.mediaDevices.getDisplayMedia(constraints);
-      } catch (err) {
-        if (!isMacOS || constraints.audio === false) {
-          throw err;
-        }
-
-        // macOS frequently rejects display capture when audio is requested.
-        stream = await navigator.mediaDevices.getDisplayMedia({
-          ...constraints,
-          audio: false,
-        });
-      }
+      const stream = await requestScreenStream(isMacOS);
 
       setScreenAccessStatus('granted');
+      setScreenError(null);
+      screenStreamRef.current = stream;
       setScreenStream(stream);
       if (screenVideoRef.current) {
         screenVideoRef.current.srcObject = stream;
+        await playPreview(screenVideoRef.current);
       }
       stream.getVideoTracks()[0].onended = () => {
+        screenStreamRef.current = null;
         setScreenStream(null);
+        setScreenError(null);
         if (recordingSource === 'screen' || recordingSource === 'overlay') {
           setRecordingSource('camera');
         }
       };
+      return true;
     } catch (err) {
       console.error("Error accessing screen:", err);
-      const message = err instanceof Error ? err.message : 'Unable to capture your screen.';
-      setScreenError(message);
+      setScreenError(describeMediaPermissionError(err, 'screen'));
       await refreshScreenAccessStatus();
+      return false;
     }
   };
-
-  useEffect(() => {
-    if (recordingSource === 'camera' || (recordingSource === 'overlay' && !cameraStream)) {
-      if (!cameraStream) setupCamera();
-    }
-    // Removed automatic setupScreen from useEffect as it requires user gesture
-  }, [recordingSource]);
 
   useEffect(() => {
     const workerCode = `
@@ -241,9 +280,8 @@ export const Recorder: React.FC<RecorderProps> = ({
     return () => {
       stopStreams();
       if (timerRef.current) clearInterval(timerRef.current);
-      if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
+      stopAudioVisualizer();
       if (compositionFrameRef.current) cancelAnimationFrame(compositionFrameRef.current);
-      if (audioContextRef.current) audioContextRef.current.close();
       if (workerRef.current) {
         workerRef.current.postMessage({ action: 'stop' });
         workerRef.current.terminate();
@@ -251,7 +289,7 @@ export const Recorder: React.FC<RecorderProps> = ({
       revokePartialUrls();
       URL.revokeObjectURL(workerUrl);
     };
-  }, [revokePartialUrls, stopStreams]);
+  }, [revokePartialUrls, stopAudioVisualizer, stopStreams]);
 
   const getOverlayRect = useCallback((): RecordingOverlayRect | undefined => {
     if (recordingSource !== 'overlay') return undefined;
@@ -679,18 +717,59 @@ export const Recorder: React.FC<RecorderProps> = ({
     (recordingSource === 'screen' || recordingSource === 'overlay') &&
     (screenAccessStatus === 'denied' || screenAccessStatus === 'restricted');
 
-  const handleGrantAccess = async () => {
-    if (recordingSource === 'camera' || recordingSource === 'overlay') {
-      await setupCamera();
-    }
+  const isMissingRequiredStream =
+    (recordingSource === 'camera' && !cameraStream) ||
+    (recordingSource === 'screen' && !screenStream) ||
+    (recordingSource === 'overlay' && (!cameraStream || !screenStream));
 
-    if (recordingSource === 'screen' || recordingSource === 'overlay') {
+  const handleGrantAccess = async () => {
+    setIsRequestingAccess(true);
+
+    if ((recordingSource === 'screen' || recordingSource === 'overlay') && !screenStream) {
       if (needsScreenSettings) {
         await window.nektarDesktop?.desktopSystem?.openScreenRecordingSettings?.();
+        setIsRequestingAccess(false);
         return;
       }
 
-      await setupScreen();
+      const grantedScreen = await setupScreen();
+      if (!grantedScreen) {
+        setIsRequestingAccess(false);
+        return;
+      }
+    }
+
+    if ((recordingSource === 'camera' || recordingSource === 'overlay') && !cameraStream) {
+      await setupCamera();
+    }
+
+    setIsRequestingAccess(false);
+  };
+
+  const selectRecordingSource = (source: RecordingSource) => {
+    setRecordingSource(source);
+
+    if (source === 'camera' && !cameraStream) {
+      void setupCamera();
+      return;
+    }
+
+    if (source === 'screen' && !screenStream) {
+      void setupScreen();
+      return;
+    }
+
+    if (source === 'overlay') {
+      void (async () => {
+        if (!screenStream) {
+          const grantedScreen = await setupScreen();
+          if (!grantedScreen) return;
+        }
+
+        if (!cameraStream) {
+          await setupCamera();
+        }
+      })();
     }
   };
 
@@ -710,28 +789,21 @@ export const Recorder: React.FC<RecorderProps> = ({
             {!isRecording && (
               <div className="flex items-center bg-white/5 rounded-lg p-0.5 border border-white/10">
                 <button
-                  onClick={() => setRecordingSource('camera')}
+                  onClick={() => selectRecordingSource('camera')}
                   className={`p-1 rounded-md transition-colors ${recordingSource === 'camera' ? 'bg-blue-600 text-white' : 'text-gray-400 hover:text-white'}`}
                   title="Camera Only"
                 >
                   <Camera size={12} />
                 </button>
                 <button
-                  onClick={() => {
-                    setRecordingSource('screen');
-                    if (!screenStream) setupScreen();
-                  }}
+                  onClick={() => selectRecordingSource('screen')}
                   className={`p-1 rounded-md transition-colors ${recordingSource === 'screen' ? 'bg-blue-600 text-white' : 'text-gray-400 hover:text-white'}`}
                   title="Screen Only"
                 >
                   <Monitor size={12} />
                 </button>
                 <button
-                  onClick={() => {
-                    setRecordingSource('overlay');
-                    if (!cameraStream) setupCamera();
-                    if (!screenStream) setupScreen();
-                  }}
+                  onClick={() => selectRecordingSource('overlay')}
                   className={`p-1 rounded-md transition-colors ${recordingSource === 'overlay' ? 'bg-blue-600 text-white' : 'text-gray-400 hover:text-white'}`}
                   title="Overlay Mode"
                 >
@@ -776,20 +848,23 @@ export const Recorder: React.FC<RecorderProps> = ({
         />
 
         {/* Permission Overlay */}
-        {((recordingSource === 'camera' && !cameraStream) || 
-          (recordingSource === 'screen' && !screenStream) || 
-          (recordingSource === 'overlay' && (!cameraStream || !screenStream))) && (
+        {isMissingRequiredStream && (
           <div className="absolute inset-0 z-50 bg-black/80 backdrop-blur-sm flex flex-col items-center justify-center p-6 text-center">
             <div className="w-12 h-12 bg-blue-500/20 rounded-2xl flex items-center justify-center mb-4 border border-blue-500/30">
               {recordingSource === 'camera' ? <Camera size={24} className="text-blue-400" /> : <Monitor size={24} className="text-blue-400" />}
             </div>
             <h3 className="text-sm font-bold text-white mb-2">Permissions Required</h3>
             <p className="text-[10px] text-gray-400 max-w-[200px] mb-4">
-              We need access to your {recordingSource === 'camera' ? 'camera' : recordingSource === 'screen' ? 'screen' : 'camera and screen'} to start recording.
+              We need access to your {recordingSource === 'camera' ? 'camera and microphone' : recordingSource === 'screen' ? 'screen' : 'camera, microphone, and screen'} to start recording.
             </p>
             {needsScreenSettings && (
               <p className="text-[10px] text-amber-300 max-w-[220px] mb-4">
                 Enable Screen Recording for Nektar in System Settings, then fully quit and reopen the app.
+              </p>
+            )}
+            {cameraError && (recordingSource === 'camera' || recordingSource === 'overlay') && (
+              <p className="text-[10px] text-rose-300 max-w-[240px] mb-4">
+                {cameraError}
               </p>
             )}
             {screenError && !needsScreenSettings && (
@@ -801,9 +876,10 @@ export const Recorder: React.FC<RecorderProps> = ({
               onClick={() => {
                 void handleGrantAccess();
               }}
-              className="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-xs font-bold transition-all shadow-lg shadow-blue-600/20"
+              disabled={isRequestingAccess}
+              className={`px-4 py-2 bg-blue-600 text-white rounded-lg text-xs font-bold transition-all shadow-lg shadow-blue-600/20 ${isRequestingAccess ? 'opacity-60 cursor-wait' : 'hover:bg-blue-500'}`}
             >
-              {needsScreenSettings ? 'Open Screen Settings' : 'Grant Access'}
+              {isRequestingAccess ? 'Requesting...' : needsScreenSettings ? 'Open Screen Settings' : 'Grant Access'}
             </button>
           </div>
         )}
@@ -845,6 +921,12 @@ export const Recorder: React.FC<RecorderProps> = ({
           })}
         </div>
 
+        {microphoneWarning && !isMissingRequiredStream && (
+          <div className="absolute bottom-3 right-3 z-40 max-w-[220px] bg-amber-950/80 px-2 py-1 rounded-md border border-amber-500/30 text-[9px] text-amber-100">
+            {microphoneWarning}
+          </div>
+        )}
+
         {(isRecording || isPaused) && (
           <div className="absolute top-3 right-3 z-40 bg-black/60 px-2 py-0.5 rounded-md backdrop-blur-md border border-white/10">
             <span className="text-xs font-mono font-bold text-white tabular-nums">
@@ -860,9 +942,9 @@ export const Recorder: React.FC<RecorderProps> = ({
           {!isRecording && !isPaused ? (
             <button
               onClick={startRecording}
-              disabled={!isArmed || (recordingSource === 'screen' && !screenStream) || (recordingSource === 'overlay' && (!screenStream || !cameraStream))}
-              className={`group flex items-center space-x-2 ${trackType === TrackType.IMAGE ? 'bg-amber-600 hover:bg-amber-700 shadow-amber-600/20' : 'bg-red-600 hover:bg-red-700 shadow-red-600/20'} ${(!isArmed || (recordingSource === 'screen' && !screenStream) || (recordingSource === 'overlay' && (!screenStream || !cameraStream))) ? 'opacity-30 cursor-not-allowed' : 'opacity-90 hover:opacity-100'} text-white px-4 py-1.5 rounded-full transition-all hover:scale-105 shadow-lg`}
-              title={!isArmed ? "Track must be armed to record" : (recordingSource !== 'camera' && !screenStream) ? "Screen permission required" : ""}
+              disabled={!isArmed || isMissingRequiredStream}
+              className={`group flex items-center space-x-2 ${trackType === TrackType.IMAGE ? 'bg-amber-600 hover:bg-amber-700 shadow-amber-600/20' : 'bg-red-600 hover:bg-red-700 shadow-red-600/20'} ${(!isArmed || isMissingRequiredStream) ? 'opacity-30 cursor-not-allowed' : 'opacity-90 hover:opacity-100'} text-white px-4 py-1.5 rounded-full transition-all hover:scale-105 shadow-lg`}
+              title={!isArmed ? "Track must be armed to record" : isMissingRequiredStream ? "Recording permission required" : ""}
             >
               {trackType === TrackType.IMAGE ? <Camera size={12} fill="currentColor" /> : <Circle size={8} fill="currentColor" />}
               <span className="text-[10px] font-bold uppercase tracking-wider">

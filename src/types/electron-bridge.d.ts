@@ -18,6 +18,8 @@ declare global {
       desktopSystem?: {
         pickSavePath(defaultPath: string): Promise<string | null>;
         getScreenAccessStatus(): Promise<'not-determined' | 'granted' | 'denied' | 'restricted' | 'unknown'>;
+        getMediaAccessStatus?(mediaType: 'camera' | 'microphone' | 'screen'): Promise<'not-determined' | 'granted' | 'denied' | 'restricted' | 'unknown'>;
+        requestMediaAccess?(mediaType: 'camera' | 'microphone'): Promise<boolean>;
         openScreenRecordingSettings(): Promise<boolean>;
       };
     };

@@ -22,7 +22,7 @@ const { app, BrowserWindow, desktopCapturer, dialog, ipcMain, session, shell, sy
     new(options: Record<string, unknown>): {
       loadURL(url: string): Promise<void>;
       loadFile(filePath: string): Promise<void>;
-      webContents: { send(channel: string, payload: unknown): void };
+      webContents: { getURL(): string; send(channel: string, payload: unknown): void };
     };
     getFocusedWindow(): { webContents: { send(channel: string, payload: unknown): void } } | null;
     getAllWindows(): Array<unknown>;
@@ -45,6 +45,22 @@ const { app, BrowserWindow, desktopCapturer, dialog, ipcMain, session, shell, sy
         ) => void | Promise<void>,
         options?: { useSystemPicker?: boolean },
       ): void;
+      setPermissionRequestHandler(
+        handler: (
+          webContents: { getURL(): string } | null,
+          permission: string,
+          callback: (permissionGranted: boolean) => void,
+          details: { requestingUrl?: string },
+        ) => void,
+      ): void;
+      setPermissionCheckHandler(
+        handler: (
+          webContents: { getURL(): string } | null,
+          permission: string,
+          requestingOrigin: string,
+          details: { requestingUrl?: string; embeddingOrigin?: string },
+        ) => boolean,
+      ): void;
     };
   };
   shell: {
@@ -52,6 +68,7 @@ const { app, BrowserWindow, desktopCapturer, dialog, ipcMain, session, shell, sy
   };
   systemPreferences: {
     getMediaAccessStatus(mediaType: 'microphone' | 'camera' | 'screen'): string;
+    askForMediaAccess(mediaType: 'microphone' | 'camera'): Promise<boolean>;
   };
 };
 
@@ -66,6 +83,33 @@ const isDevelopment = !app.isPackaged;
 const rendererUrl = process.env.ELECTRON_RENDERER_URL || 'http://localhost:3000';
 const macScreenRecordingSettingsUrl =
   'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture';
+const capturablePermissions = new Set(['media', 'display-capture']);
+
+function isTrustedRendererUrl(url: string | undefined) {
+  if (!url) return false;
+
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol === 'file:') return !isDevelopment;
+    return parsed.origin === new URL(rendererUrl).origin;
+  } catch {
+    return false;
+  }
+}
+
+function isTrustedPermissionRequest(
+  webContents: { getURL(): string } | null,
+  permission: string,
+  details: { requestingUrl?: string; embeddingOrigin?: string } = {},
+) {
+  if (!capturablePermissions.has(permission)) return false;
+
+  return (
+    isTrustedRendererUrl(details.requestingUrl) ||
+    isTrustedRendererUrl(details.embeddingOrigin) ||
+    isTrustedRendererUrl(webContents?.getURL())
+  );
+}
 
 async function createWindow() {
   const win = new BrowserWindow({
@@ -91,9 +135,15 @@ async function createWindow() {
 app.whenReady().then(async () => {
   await cleanupStaleDesktopExports();
 
+  session.defaultSession.setPermissionRequestHandler((webContents, permission, callback, details) => {
+    callback(isTrustedPermissionRequest(webContents, permission, details));
+  });
+  session.defaultSession.setPermissionCheckHandler((webContents, permission, _requestingOrigin, details) => {
+    return isTrustedPermissionRequest(webContents, permission, details);
+  });
   session.defaultSession.setDisplayMediaRequestHandler(
     async (_request, callback) => {
-      const sources = await desktopCapturer.getSources({ types: ['screen'] });
+      const sources = await desktopCapturer.getSources({ types: ['screen', 'window'] });
       const primarySource = sources[0];
       callback(primarySource ? { video: primarySource } : {});
     },
@@ -124,6 +174,17 @@ app.whenReady().then(async () => {
     }
 
     return systemPreferences.getMediaAccessStatus('screen');
+  });
+  ipcMain.handle('desktop-system:get-media-access-status', (_event: unknown, mediaType: 'camera' | 'microphone' | 'screen') => {
+    return systemPreferences.getMediaAccessStatus(mediaType);
+  });
+  ipcMain.handle('desktop-system:request-media-access', async (_event: unknown, mediaType: 'camera' | 'microphone') => {
+    if (process.platform !== 'darwin') {
+      const status = systemPreferences.getMediaAccessStatus(mediaType);
+      return status !== 'denied' && status !== 'restricted';
+    }
+
+    return systemPreferences.askForMediaAccess(mediaType);
   });
   ipcMain.handle('desktop-system:open-screen-recording-settings', async () => {
     if (process.platform !== 'darwin') {
