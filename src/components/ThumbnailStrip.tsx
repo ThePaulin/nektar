@@ -2,6 +2,7 @@ import React, { useEffect, useState, useRef } from 'react';
 
 interface ThumbnailStripProps {
   videoUrl: string;
+  imageUrl?: string;
   duration: number;
   sourceStart: number;
   pixelsPerSecond: number;
@@ -35,6 +36,7 @@ const releaseGenerator = () => {
 
 export const ThumbnailStrip: React.FC<ThumbnailStripProps> = ({
   videoUrl,
+  imageUrl,
   duration,
   sourceStart,
   pixelsPerSecond,
@@ -43,8 +45,14 @@ export const ThumbnailStrip: React.FC<ThumbnailStripProps> = ({
   const [thumbnails, setThumbnails] = useState<string[]>([]);
   const thumbnailWidth = 100; // px
   const count = Math.max(1, Math.ceil(clipWidth / thumbnailWidth));
+  const isImageMode = !!imageUrl;
 
   useEffect(() => {
+    if (isImageMode) {
+      setThumbnails(Array.from({ length: count }, () => imageUrl || ''));
+      return;
+    }
+
     let isMounted = true;
     const generatedThumbnails: string[] = [];
 
@@ -117,7 +125,7 @@ export const ThumbnailStrip: React.FC<ThumbnailStripProps> = ({
     return () => {
       isMounted = false;
     };
-  }, [videoUrl, count, sourceStart, pixelsPerSecond]);
+  }, [videoUrl, imageUrl, isImageMode, count, sourceStart, pixelsPerSecond]);
 
   return (
     <div className="flex h-full w-full overflow-hidden opacity-60 group-hover:opacity-100 transition-opacity">

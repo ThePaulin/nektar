@@ -1,0 +1,42 @@
+import type {
+  DesktopExportProgress,
+  DesktopExportRequest,
+  DesktopExportResult,
+} from '../types';
+
+declare global {
+  interface Window {
+    nektarDesktop?: {
+      desktopExport: {
+        isAvailable(): Promise<boolean>;
+        start(request: DesktopExportRequest): Promise<{ jobId: string }>;
+        cancel(jobId: string): Promise<void>;
+        onProgress(listener: (progress: DesktopExportProgress) => void): () => void;
+        getResult(jobId: string): Promise<DesktopExportResult>;
+        copyResult(jobId: string, targetPath: string): Promise<string>;
+      };
+      desktopSystem?: {
+        pickSavePath(defaultPath: string): Promise<string | null>;
+        getScreenAccessStatus(): Promise<'not-determined' | 'granted' | 'denied' | 'restricted' | 'unknown'>;
+        getMediaAccessStatus?(mediaType: 'camera' | 'microphone' | 'screen'): Promise<'not-determined' | 'granted' | 'denied' | 'restricted' | 'unknown'>;
+        requestMediaAccess?(mediaType: 'camera' | 'microphone'): Promise<boolean>;
+        openScreenRecordingSettings(): Promise<boolean>;
+        listDisplaySources?(): Promise<Array<{ id: string; name: string }>>;
+        setDisplaySource?(sourceId: string | null): Promise<void>;
+      };
+    };
+  }
+}
+
+declare module 'electron' {
+  export const app: any;
+  export const BrowserWindow: any;
+  export const ipcMain: any;
+  export const ipcRenderer: any;
+  export const contextBridge: any;
+  export const dialog: any;
+  export const shell: any;
+  export const systemPreferences: any;
+}
+
+export {};

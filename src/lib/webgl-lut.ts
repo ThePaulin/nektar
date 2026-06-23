@@ -102,7 +102,8 @@ export class WebGLLUT {
     overlayRect?: { x: number; y: number; width: number; height: number },
     sourceWidth?: number,
     sourceHeight?: number,
-    crop?: { top: number; right: number; bottom: number; left: number }
+    crop?: { top: number; right: number; bottom: number; left: number },
+    destination?: { dx: number; dy: number; dw: number; dh: number }
   ) {
     const gl = this.gl;
     const prog = this.program;
@@ -182,6 +183,15 @@ export class WebGLLUT {
     }
 
     gl.viewport(0, 0, gl.canvas.width, gl.canvas.height);
+    gl.clearColor(0, 0, 0, 0);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+
+    if (destination && destination.dw > 0 && destination.dh > 0) {
+      const viewportX = Math.round(gl.canvas.width / 2 + destination.dx);
+      const viewportY = Math.round(gl.canvas.height / 2 - destination.dy - destination.dh);
+      gl.viewport(viewportX, viewportY, Math.round(destination.dw), Math.round(destination.dh));
+    }
+
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
     
     gl.deleteBuffer(posBuffer);

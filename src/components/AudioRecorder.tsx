@@ -1,18 +1,45 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { Mic, Square, Circle, X } from 'lucide-react';
+import {
+  RecordingCompletePayload,
+  RecordingProgressPayload,
+  RecordingStartPayload,
+} from '../types';
+import {
+  describeMediaPermissionError,
+  listRecordingDevices,
+  MicrophoneStreamOptions,
+  RecordingDeviceOption,
+  requestMicrophoneStream,
+} from '../lib/media-permissions';
 
 interface AudioRecorderProps {
-  onRecordingComplete: (audioUrl: string, duration: number, blob: Blob) => void;
-  onStartRecording?: () => void;
+  onRecordingComplete: (payload: RecordingCompletePayload) => void;
+  onStartRecording?: (payload: RecordingStartPayload) => void;
+  onStopRecording?: () => void;
+  onRecordingProgress?: (payload: RecordingProgressPayload) => void;
+  onRecordingPause?: () => void;
+  onRecordingResume?: () => void;
   onClose?: () => void;
   isActive?: boolean;
   isArmed?: boolean;
 }
 
-export const AudioRecorder: React.FC<AudioRecorderProps> = ({ onRecordingComplete, onStartRecording, onClose, isActive = true, isArmed = true }) => {
+export const AudioRecorder: React.FC<AudioRecorderProps> = ({
+  onRecordingComplete,
+  onStartRecording,
+  onStopRecording,
+  onRecordingProgress,
+  onRecordingPause,
+  onRecordingResume,
+  onClose,
+  isActive = true,
+  isArmed = true,
+}) => {
   const [isRecording, setIsRecording] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
   const [stream, setStream] = useState<MediaStream | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
   const [recordingTime, setRecordingTime] = useState(0);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
@@ -23,63 +50,145 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({ onRecordingComplet
   const analyserRef = useRef<AnalyserNode | null>(null);
   const animationFrameRef = useRef<number | null>(null);
   const [audioLevel, setAudioLevel] = useState(0);
+  const [microphoneDevices, setMicrophoneDevices] = useState<RecordingDeviceOption[]>([]);
+  const [selectedMicrophoneDeviceId, setSelectedMicrophoneDeviceId] = useState('');
+  const [permissionError, setPermissionError] = useState<string | null>(null);
+  const [isRequestingAccess, setIsRequestingAccess] = useState(false);
 
   const onRecordingCompleteRef = useRef(onRecordingComplete);
   const onStartRecordingRef = useRef(onStartRecording);
+  const onStopRecordingRef = useRef(onStopRecording);
+  const onRecordingProgressRef = useRef(onRecordingProgress);
+  const onRecordingPauseRef = useRef(onRecordingPause);
+  const onRecordingResumeRef = useRef(onRecordingResume);
+  const partialUrlRef = useRef<string | null>(null);
 
   useEffect(() => {
     onRecordingCompleteRef.current = onRecordingComplete;
     onStartRecordingRef.current = onStartRecording;
-  }, [onRecordingComplete, onStartRecording]);
+    onStopRecordingRef.current = onStopRecording;
+    onRecordingProgressRef.current = onRecordingProgress;
+    onRecordingPauseRef.current = onRecordingPause;
+    onRecordingResumeRef.current = onRecordingResume;
+  }, [onRecordingComplete, onStartRecording, onStopRecording, onRecordingProgress, onRecordingPause, onRecordingResume]);
 
-  useEffect(() => {
-    async function setupAudio() {
-      try {
-        const mediaStream = await navigator.mediaDevices.getUserMedia({
-          audio: true,
-          video: false
-        });
-        setStream(mediaStream);
-
-        // Setup visualizer
-        const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
-        const source = audioContext.createMediaStreamSource(mediaStream);
-        const analyser = audioContext.createAnalyser();
-        analyser.fftSize = 256;
-        source.connect(analyser);
-
-        audioContextRef.current = audioContext;
-        analyserRef.current = analyser;
-
-        const updateVisualizer = () => {
-          if (analyserRef.current) {
-            const dataArray = new Uint8Array(analyserRef.current.frequencyBinCount);
-            analyserRef.current.getByteFrequencyData(dataArray);
-            const average = dataArray.reduce((a, b) => a + b) / dataArray.length;
-            setAudioLevel(average / 128); // Normalize to 0-1 approx
-          }
-          animationFrameRef.current = requestAnimationFrame(updateVisualizer);
-        };
-        updateVisualizer();
-
-      } catch (err) {
-        console.error("Error accessing microphone:", err);
-        alert("Could not access microphone. Please ensure permissions are granted.");
-        onClose?.();
-      }
+  const stopAudioVisualizer = () => {
+    if (animationFrameRef.current) {
+      cancelAnimationFrame(animationFrameRef.current);
+      animationFrameRef.current = null;
     }
 
-    setupAudio();
+    analyserRef.current = null;
+
+    if (audioContextRef.current) {
+      void audioContextRef.current.close();
+      audioContextRef.current = null;
+    }
+
+    setAudioLevel(0);
+  };
+
+  const startAudioVisualizer = (mediaStream: MediaStream) => {
+    stopAudioVisualizer();
+
+    const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+    const source = audioContext.createMediaStreamSource(mediaStream);
+    const analyser = audioContext.createAnalyser();
+    analyser.fftSize = 256;
+    source.connect(analyser);
+
+    audioContextRef.current = audioContext;
+    analyserRef.current = analyser;
+
+    const updateVisualizer = () => {
+      if (analyserRef.current) {
+        const dataArray = new Uint8Array(analyserRef.current.frequencyBinCount);
+        analyserRef.current.getByteFrequencyData(dataArray);
+        const average = dataArray.reduce((a, b) => a + b) / dataArray.length;
+        setAudioLevel(average / 128);
+      }
+      animationFrameRef.current = requestAnimationFrame(updateVisualizer);
+    };
+    updateVisualizer();
+  };
+
+  const refreshDeviceList = async () => {
+    try {
+      const { microphones } = await listRecordingDevices();
+      setMicrophoneDevices(microphones);
+      setSelectedMicrophoneDeviceId((current) => current || microphones[0]?.deviceId || '');
+    } catch (err) {
+      console.error("Error listing microphone devices:", err);
+    }
+  };
+
+  const stopStream = () => {
+    if (!streamRef.current) return;
+    streamRef.current.getTracks().forEach(track => track.stop());
+    streamRef.current = null;
+    setStream(null);
+    stopAudioVisualizer();
+  };
+
+  const setupAudio = async (options: MicrophoneStreamOptions = {}) => {
+    setIsRequestingAccess(true);
+    setPermissionError(null);
+
+    try {
+      const mediaStream = await requestMicrophoneStream({
+        microphoneDeviceId: options.microphoneDeviceId ?? selectedMicrophoneDeviceId,
+      });
+      streamRef.current = mediaStream;
+      setStream(mediaStream);
+      mediaStream.getAudioTracks()[0]?.addEventListener('ended', () => {
+        streamRef.current = null;
+        setStream(null);
+        stopAudioVisualizer();
+      });
+      startAudioVisualizer(mediaStream);
+      void refreshDeviceList();
+      return true;
+    } catch (err) {
+      console.error("Error accessing microphone:", err);
+      setPermissionError(describeMediaPermissionError(err, 'microphone'));
+      return false;
+    } finally {
+      setIsRequestingAccess(false);
+    }
+  };
+
+  useEffect(() => {
+    void refreshDeviceList();
+    const handleDeviceChange = () => {
+      void refreshDeviceList();
+    };
+    navigator.mediaDevices?.addEventListener?.('devicechange', handleDeviceChange);
 
     return () => {
-      if (stream) {
-        stream.getTracks().forEach(track => track.stop());
-      }
+      navigator.mediaDevices?.removeEventListener?.('devicechange', handleDeviceChange);
+      stopStream();
       if (timerRef.current) clearInterval(timerRef.current);
-      if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
-      if (audioContextRef.current) audioContextRef.current.close();
+      if (partialUrlRef.current) URL.revokeObjectURL(partialUrlRef.current);
     };
   }, []);
+
+  const getElapsedDuration = () => {
+    if (isRecording) {
+      return accumulatedTimeRef.current + (Date.now() - startTimeRef.current) / 1000;
+    }
+    return accumulatedTimeRef.current;
+  };
+
+  const emitProgress = (blob: Blob) => {
+    if (partialUrlRef.current) URL.revokeObjectURL(partialUrlRef.current);
+    const url = URL.createObjectURL(blob);
+    partialUrlRef.current = url;
+    onRecordingProgressRef.current?.({
+      duration: getElapsedDuration(),
+      source: 'camera',
+      recordings: [{ source: 'camera', url, blob }],
+    });
+  };
 
   const startRecording = () => {
     if (!stream) return;
@@ -96,6 +205,7 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({ onRecordingComplet
     mediaRecorder.ondataavailable = (e) => {
       if (e.data.size > 0) {
         chunksRef.current.push(e.data);
+        emitProgress(new Blob(chunksRef.current, { type: mediaRecorder.mimeType || 'audio/webm' }));
       }
     };
 
@@ -103,17 +213,21 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({ onRecordingComplet
       const mimeType = mediaRecorder.mimeType || 'audio/webm';
       const blob = new Blob(chunksRef.current, { type: mimeType });
       const url = URL.createObjectURL(blob);
-      onRecordingCompleteRef.current(url, accumulatedTimeRef.current, blob);
+      onRecordingCompleteRef.current({
+        duration: accumulatedTimeRef.current,
+        source: 'camera',
+        recordings: [{ source: 'camera', url, blob }],
+      });
     };
 
-    mediaRecorder.start();
+    mediaRecorder.start(500);
     setIsRecording(true);
     setIsPaused(false);
     setRecordingTime(0);
     accumulatedTimeRef.current = 0;
     startTimeRef.current = Date.now();
 
-    if (onStartRecordingRef.current) onStartRecordingRef.current();
+    if (onStartRecordingRef.current) onStartRecordingRef.current({ source: 'camera' });
 
     timerRef.current = window.setInterval(() => {
       const elapsed = (Date.now() - startTimeRef.current) / 1000;
@@ -126,6 +240,7 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({ onRecordingComplet
       if (isRecording) {
         accumulatedTimeRef.current += (Date.now() - startTimeRef.current) / 1000;
       }
+      onStopRecordingRef.current?.();
       mediaRecorderRef.current.stop();
       setIsRecording(false);
       setIsPaused(false);
@@ -140,6 +255,7 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({ onRecordingComplet
       setIsPaused(true);
       setIsRecording(false);
       if (timerRef.current) clearInterval(timerRef.current);
+      onRecordingPauseRef.current?.();
     }
   };
 
@@ -149,6 +265,7 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({ onRecordingComplet
       setIsPaused(false);
       setIsRecording(true);
       startTimeRef.current = Date.now();
+      onRecordingResumeRef.current?.();
 
       timerRef.current = window.setInterval(() => {
         const elapsed = (Date.now() - startTimeRef.current) / 1000;
@@ -185,6 +302,16 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({ onRecordingComplet
     return `${mins}:${secs.toString().padStart(2, '0')}`;
   };
 
+  const handleMicrophoneDeviceChange = (deviceId: string) => {
+    setSelectedMicrophoneDeviceId(deviceId);
+    if (isRecording || isPaused || !stream) return;
+
+    stopStream();
+    void setupAudio({ microphoneDeviceId: deviceId });
+  };
+
+  const canEditDevices = !isRecording && !isPaused && !isRequestingAccess;
+
   return (
     <div className="relative aspect-video w-fit h-full aspect-video flex flex-col bg-[#111] overflow-hidden border border-white/10 shadow-2xl rounded-xl min-h-0">
       {/* Header */}
@@ -195,11 +322,31 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({ onRecordingComplet
             {isRecording ? 'Recording Audio' : 'Audio'}
           </span>
         </div>
-        {onClose && (
-          <button onClick={onClose} className="p-1 hover:bg-white/10 rounded-full transition-colors">
-            <X size={14} />
-          </button>
-        )}
+        <div className="flex items-center gap-2">
+          <select
+            aria-label="Microphone device"
+            title="Microphone device"
+            value={selectedMicrophoneDeviceId}
+            onChange={(event) => handleMicrophoneDeviceChange(event.target.value)}
+            disabled={!canEditDevices}
+            className="min-w-0 max-w-[180px] bg-black/70 border border-white/10 rounded-md px-2 py-1 text-[10px] text-white outline-none disabled:opacity-50"
+          >
+            {microphoneDevices.length === 0 ? (
+              <option value="">Microphone</option>
+            ) : (
+              microphoneDevices.map((device) => (
+                <option key={device.deviceId || device.label} value={device.deviceId}>
+                  {device.label}
+                </option>
+              ))
+            )}
+          </select>
+          {onClose && (
+            <button onClick={onClose} className="p-1 hover:bg-white/10 rounded-full transition-colors">
+              <X size={14} />
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Audio Visualizer Area */}
@@ -285,6 +432,32 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({ onRecordingComplet
             </span>
           </div>
         )}
+
+        {!stream && (
+          <div className="absolute inset-0 z-20 bg-black/80 backdrop-blur-sm flex flex-col items-center justify-center p-6 text-center">
+            <div className="w-12 h-12 bg-blue-500/20 rounded-2xl flex items-center justify-center mb-4 border border-blue-500/30">
+              <Mic size={24} className="text-blue-400" />
+            </div>
+            <h3 className="text-sm font-bold text-white mb-2">Microphone Required</h3>
+            <p className="text-[10px] text-gray-400 max-w-[220px] mb-4">
+              We need access to your microphone to start audio recording.
+            </p>
+            {permissionError && (
+              <p className="text-[10px] text-rose-300 max-w-[240px] mb-4">
+                {permissionError}
+              </p>
+            )}
+            <button
+              onClick={() => {
+                void setupAudio();
+              }}
+              disabled={isRequestingAccess}
+              className={`px-4 py-2 bg-blue-600 text-white rounded-lg text-xs font-bold transition-all shadow-lg shadow-blue-600/20 ${isRequestingAccess ? 'opacity-60 cursor-wait' : 'hover:bg-blue-500'}`}
+            >
+              {isRequestingAccess ? 'Requesting...' : 'Grant Access'}
+            </button>
+          </div>
+        )}
       </div>
 
       {/* Controls */}
@@ -293,9 +466,9 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({ onRecordingComplet
           {!isRecording && !isPaused ? (
             <button
               onClick={startRecording}
-              disabled={!isArmed}
-              className={`group flex items-center space-x-2 bg-red-600 ${!isArmed ? 'opacity-30 cursor-not-allowed' : 'opacity-90 hover:opacity-100 hover:bg-red-700'} text-white px-4 py-1.5 rounded-full transition-all hover:scale-105 shadow-lg shadow-red-600/20`}
-              title={!isArmed ? "Track must be armed to record" : ""}
+              disabled={!isArmed || !stream}
+              className={`group flex items-center space-x-2 bg-red-600 ${(!isArmed || !stream) ? 'opacity-30 cursor-not-allowed' : 'opacity-90 hover:opacity-100 hover:bg-red-700'} text-white px-4 py-1.5 rounded-full transition-all hover:scale-105 shadow-lg shadow-red-600/20`}
+              title={!isArmed ? "Track must be armed to record" : !stream ? "Microphone permission required" : ""}
             >
               <Circle size={8} fill="currentColor" />
               <span className="text-[10px] font-bold uppercase tracking-wider">Start Recording</span>

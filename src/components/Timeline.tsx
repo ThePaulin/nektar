@@ -13,6 +13,7 @@ interface TimelineProps {
   tracks: Track[];
   selectedTrackId: string;
   currentTime: number;
+  isInteractionLocked?: boolean;
   onTimeChange: (time: number) => void;
   onClipsUpdate?: (updates: { id: number; newStart: number; newTrackId?: string }[]) => void;
   onClipTrim?: (clipId: number, side: 'left' | 'right', newTime: number) => void;
@@ -66,6 +67,7 @@ export const Timeline: React.FC<TimelineProps> = ({
   tracks,
   selectedTrackId,
   currentTime,
+  isInteractionLocked = false,
   onTimeChange,
   onClipsUpdate,
   onClipTrim,
@@ -121,6 +123,21 @@ export const Timeline: React.FC<TimelineProps> = ({
   const initialSelectionRef = useRef<number[]>([]);
 
   const SNAP_THRESHOLD_PX = 10;
+  const visibleTracks = tracks.filter((track) => {
+    if (track.isSubTrack) {
+      return clips.some((clip) => clip.trackId === track.id);
+    }
+    return true;
+  });
+  const visibleTrackOffsets = (() => {
+    let top = 0;
+    return visibleTracks.reduce((acc: Record<string, { top: number; height: number }>, track) => {
+      const height = track.isSubTrack ? TRACK_HEIGHTS.sm : trackHeight;
+      acc[track.id] = { top, height };
+      top += height;
+      return acc;
+    }, {});
+  })();
 
   useEffect(() => {
     const timelineEl = timelineRootRef.current;
@@ -201,6 +218,7 @@ export const Timeline: React.FC<TimelineProps> = ({
   };
 
   const handleClipDrag = (e: MouseEvent | TouchEvent) => {
+    if (isInteractionLocked) return;
     if (draggingClipId !== null && tracksScrollRef.current && onClipsUpdate) {
       const anchorInitial = initialDragPositions[draggingClipId];
       if (!anchorInitial) return;
@@ -250,8 +268,10 @@ export const Timeline: React.FC<TimelineProps> = ({
       }
 
       // Track switching logic
-      const trackIndex = Math.floor(y / trackHeight);
-      const targetTrack = tracks[trackIndex];
+      const targetTrack = visibleTracks.find((track) => {
+        const offset = visibleTrackOffsets[track.id];
+        return offset ? y >= offset.top && y < offset.top + offset.height : false;
+      });
       
       // Prevent moving to a locked track
       if (targetTrack && targetTrack.isLocked) return;
@@ -278,6 +298,7 @@ export const Timeline: React.FC<TimelineProps> = ({
   };
 
   const handleTrimDrag = (e: MouseEvent | TouchEvent) => {
+    if (isInteractionLocked) return;
     if (trimmingClipId !== null && tracksScrollRef.current && onClipTrim) {
       const rect = tracksScrollRef.current.getBoundingClientRect();
       const clientX = 'touches' in e ? e.touches[0].clientX : e.clientX;
@@ -301,6 +322,7 @@ export const Timeline: React.FC<TimelineProps> = ({
   };
 
   const handleClipSelection = (e: React.MouseEvent | MouseEvent, clipId: number) => {
+    if (isInteractionLocked) return selectedClipIds;
     if (!onSelectionChange) return selectedClipIds;
 
     const isSelected = selectedClipIds.includes(clipId);
@@ -344,13 +366,13 @@ export const Timeline: React.FC<TimelineProps> = ({
         const marqueeSelectedIds = clips.filter(clip => {
           const track = tracks.find(t => t.id === clip.trackId);
           if (track?.isLocked) return false;
+          const trackOffset = visibleTrackOffsets[clip.trackId];
+          if (!trackOffset) return false;
 
           const clipX1 = clip.timelinePosition.start * pixelsPerSecond;
           const clipX2 = clip.timelinePosition.end * pixelsPerSecond;
-
-          const trackIndex = tracks.findIndex(t => t.id === clip.trackId);
-          const clipY1 = trackIndex * trackHeight;
-          const clipY2 = clipY1 + trackHeight;
+          const clipY1 = trackOffset.top;
+          const clipY2 = clipY1 + trackOffset.height;
 
           return (
             clipX1 < x2 &&
@@ -385,7 +407,7 @@ export const Timeline: React.FC<TimelineProps> = ({
       window.removeEventListener('mousemove', handleMouseMove);
       window.removeEventListener('mouseup', handleMouseUp);
     };
-  }, [isSelecting, clips, pixelsPerSecond, onSelectionChange, tracks]);
+  }, [isSelecting, clips, pixelsPerSecond, onSelectionChange, tracks, visibleTrackOffsets]);
 
   useEffect(() => {
     const onPlayheadMouseUp = () => {
@@ -461,6 +483,7 @@ export const Timeline: React.FC<TimelineProps> = ({
   };
 
   const handleRulerMouseDown = (e: React.MouseEvent) => {
+    if (isInteractionLocked) return;
     if (headerScrollRef.current) {
       const rect = headerScrollRef.current.getBoundingClientRect();
       const x = e.clientX - rect.left + headerScrollRef.current.scrollLeft;
@@ -497,6 +520,7 @@ export const Timeline: React.FC<TimelineProps> = ({
   };
 
   const handleTimelineMouseDown = (e: React.MouseEvent) => {
+    if (isInteractionLocked) return;
     if (tracksScrollRef.current) {
       const rect = tracksScrollRef.current.getBoundingClientRect();
       const x = e.clientX - rect.left + tracksScrollRef.current.scrollLeft;
@@ -566,7 +590,7 @@ export const Timeline: React.FC<TimelineProps> = ({
   return (
     <div
       ref={timelineRootRef}
-      className={`relative flex flex-col w-full bg-[#F5F5F5] border-t border-gray-200 select-none h-full overflow-hidden overscroll-x-none touch-pan-y ${isDraggingPlayhead || draggingClipId !== null || trimmingClipId !== null || isSelecting ? 'cursor-grabbing' : ''
+      className={`relative flex flex-col w-full bg-[#F5F5F5] border-t border-gray-200 select-none h-full overflow-hidden overscroll-x-none touch-pan-y ${isInteractionLocked ? 'cursor-not-allowed' : isDraggingPlayhead || draggingClipId !== null || trimmingClipId !== null || isSelecting ? 'cursor-grabbing' : ''
         }`}
     >
       {/* Header Row */}
@@ -641,14 +665,7 @@ export const Timeline: React.FC<TimelineProps> = ({
               onReorder={onTracksReorder}
               className="flex flex-col"
             >
-              {tracks
-                .filter(track => {
-                  if (track.isSubTrack) {
-                    const hasClips = clips.some(c => c.trackId === track.id);
-                    return hasClips;
-                  }
-                  return true;
-                })
+              {visibleTracks
                 .map((track) => {
                   const currentTrackHeight = track.isSubTrack ? TRACK_HEIGHTS.sm : trackHeight;
                   
@@ -884,14 +901,7 @@ export const Timeline: React.FC<TimelineProps> = ({
             >
               {/* Tracks Area */}
               <div className="relative">
-                {tracks
-                  .filter(track => {
-                    if (track.isSubTrack) {
-                      const hasClips = clips.some(c => c.trackId === track.id);
-                      return hasClips;
-                    }
-                    return true;
-                  })
+                {visibleTracks
                   .map((track) => {
                     const currentTrackHeight = track.isSubTrack ? TRACK_HEIGHTS.sm : trackHeight;
                     
@@ -901,6 +911,7 @@ export const Timeline: React.FC<TimelineProps> = ({
                         className={`relative border-b border-gray-200/50 transition-all ${selectedTrackId === track.id ? 'bg-blue-50/20' : ''} ${track.isLocked ? 'bg-gray-100/5' : ''} ${draggingTrackId === track.id ? 'bg-blue-500/5 ring-1 ring-inset ring-blue-500/20' : ''}`}
                         style={{ height: currentTrackHeight }}
                     onDoubleClick={(e) => {
+                      if (isInteractionLocked) return;
                       if (track.isLocked) return;
                       if (track.type === TrackType.TEXT || track.type === TrackType.SUBTITLE) {
                         const rect = e.currentTarget.getBoundingClientRect();
@@ -943,7 +954,7 @@ export const Timeline: React.FC<TimelineProps> = ({
                       return (
                         <div
                           key={clip.id}
-                          className={`absolute top-2 bg-black rounded-md border-2 overflow-hidden group shadow-lg transition-[border-color,transform,shadow,ring] ${clip.isPlaceholder ? 'border-dashed border-blue-400/50 bg-blue-900/20' : ''} ${track.isLocked ? 'border-gray-700 opacity-60 cursor-not-allowed grayscale-[0.5]' :
+                          className={`absolute top-2 bg-black rounded-md border-2 overflow-hidden group shadow-lg transition-[border-color,transform,shadow,ring] ${clip.isPlaceholder ? 'border-dashed border-blue-400/50 bg-blue-900/20' : ''} ${clip.isRecording ? 'border-red-500/70 shadow-red-500/20' : ''} ${track.isLocked ? 'border-gray-700 opacity-60 cursor-not-allowed grayscale-[0.5]' :
                             draggingClipId === clip.id ? 'border-blue-500 z-40 scale-[1.02] shadow-blue-500/30 !transition-none cursor-grabbing' :
                               isSelected ? 'border-blue-500 z-30 shadow-blue-500/40 ring-2 ring-blue-500/20 cursor-grab' : 'border-gray-800 cursor-grab active:cursor-grabbing'
                             }`}
@@ -953,6 +964,7 @@ export const Timeline: React.FC<TimelineProps> = ({
                             height: currentTrackHeight - 16
                           }}
                           onMouseDown={(e) => {
+                            if (isInteractionLocked) return;
                             if (track.isLocked) return;
                             e.stopPropagation();
                             e.preventDefault();
@@ -972,11 +984,13 @@ export const Timeline: React.FC<TimelineProps> = ({
                             onManipulationStart?.();
                           }}
                           onDoubleClick={(e) => {
+                            if (isInteractionLocked) return;
                             if (track.isLocked) return;
                             e.stopPropagation();
                             startEditing(clip);
                           }}
                           onKeyDown={(e) => {
+                            if (isInteractionLocked) return;
                             if (track.isLocked) return;
                             if (e.key === 'Enter' && selectedClipIds.includes(clip.id) && editingClipId === null) {
                               e.stopPropagation();
@@ -994,9 +1008,26 @@ export const Timeline: React.FC<TimelineProps> = ({
                             <div className="w-full h-full flex items-center justify-center bg-blue-900/10">
                               <span className="text-[10px] text-blue-400/50 font-bold uppercase tracking-widest">Group Track</span>
                             </div>
+                          ) : clip.isRecording ? (
+                            <div className={`w-full h-full flex items-center justify-center ${clip.type === TrackType.AUDIO ? 'bg-emerald-950/70' : 'bg-red-950/70'} relative`}>
+                              <div className="absolute inset-0 bg-[linear-gradient(135deg,rgba(255,255,255,0.06)_25%,transparent_25%,transparent_50%,rgba(255,255,255,0.06)_50%,rgba(255,255,255,0.06)_75%,transparent_75%,transparent)] bg-[length:18px_18px]" />
+                              <div className="relative z-10 flex items-center space-x-2">
+                                <div className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
+                                <span className="text-[10px] text-white/80 font-bold uppercase tracking-[0.2em]">Recording</span>
+                              </div>
+                            </div>
                           ) : clip.type === TrackType.VIDEO || clip.type === TrackType.IMAGE || clip.type === TrackType.SCREEN ? (
                             <ThumbnailStrip
                               videoUrl={clip.videoUrl || clip.thumbnailUrl || ''}
+                              duration={clip.duration}
+                              sourceStart={clip.sourceStart}
+                              pixelsPerSecond={pixelsPerSecond}
+                              clipWidth={duration * pixelsPerSecond}
+                            />
+                          ) : clip.type === TrackType.IMAGE ? (
+                            <ThumbnailStrip
+                              videoUrl=""
+                              imageUrl={clip.thumbnailUrl || clip.videoUrl || ''}
                               duration={clip.duration}
                               sourceStart={clip.sourceStart}
                               pixelsPerSecond={pixelsPerSecond}
@@ -1057,6 +1088,7 @@ export const Timeline: React.FC<TimelineProps> = ({
                           <div
                             className={`absolute left-0 top-0 bottom-0 w-2 bg-blue-500/0 ${track.isLocked ? '' : 'group-hover:bg-blue-500/40 cursor-col-resize'} z-50 transition-colors`}
                             onMouseDown={(e) => {
+                              if (isInteractionLocked) return;
                               if (track.isLocked) return;
                               e.stopPropagation();
                               handleClipSelection(e, clip.id);
@@ -1067,6 +1099,7 @@ export const Timeline: React.FC<TimelineProps> = ({
                           <div
                             className={`absolute right-0 top-0 bottom-0 w-2 bg-blue-500/0 ${track.isLocked ? '' : 'group-hover:bg-blue-500/40 cursor-col-resize'} z-50 transition-colors`}
                             onMouseDown={(e) => {
+                              if (isInteractionLocked) return;
                               if (track.isLocked) return;
                               e.stopPropagation();
                               handleClipSelection(e, clip.id);
@@ -1113,7 +1146,11 @@ export const Timeline: React.FC<TimelineProps> = ({
                 >
                   <div
                     className="absolute top-0 -translate-x-1/2 w-3 h-4 bg-blue-600 rounded-b-sm cursor-col-resize pointer-events-auto"
-                    onMouseDown={(e) => { e.stopPropagation(); setIsDraggingPlayhead(true); }}
+                    onMouseDown={(e) => {
+                      if (isInteractionLocked) return;
+                      e.stopPropagation();
+                      setIsDraggingPlayhead(true);
+                    }}
                   />
                   <div className="w-px h-full bg-blue-600" />
                 </div>

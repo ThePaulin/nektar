@@ -71,7 +71,7 @@ export const EditorPane: React.FC<EditorPaneProps> = ({
     } else if (selectedTrack.type === TrackType.IMAGE) {
       onAddClip({
         type: TrackType.IMAGE,
-        videoUrl: clipboardContent,
+        thumbnailUrl: clipboardContent,
         label: 'Pasted Image',
         duration: 5,
       });

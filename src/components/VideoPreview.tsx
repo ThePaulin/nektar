@@ -1,13 +1,16 @@
 import React, { useRef, useEffect, useMemo, useState, useCallback } from 'react';
-import { VideoObjType, VideoClip, Track, TrackType, LUTData } from '../types';
+import { VideoObjType, VideoClip, Track, TrackType, LUTData, RecordingSession, RecordingSource } from '../types';
 import { WebGLLUT } from '../lib/webgl-lut';
 import { WebGPURenderer } from '../lib/renderer-webgpu';
+import { buildTextRenderMetrics, getAspectFitRenderMetrics, resolveClipTransformForRender } from '../lib/export-shared';
 
 interface VideoPreviewProps {
   clips: VideoObjType;
   tracks: Track[];
   currentTime: number;
   isPlaying: boolean;
+  isRecordingActive: boolean;
+  recordingSession: RecordingSession | null;
   showLutPreview?: boolean;
 }
 
@@ -20,11 +23,14 @@ export const VideoPreview: React.FC<VideoPreviewProps> = ({
   tracks, 
   currentTime, 
   isPlaying, 
+  isRecordingActive,
+  recordingSession,
   showLutPreview = true 
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const videoRefs = useRef<{ [key: string]: HTMLVideoElement | null }>({});
+  const liveVideoRefs = useRef<Partial<Record<RecordingSource, HTMLVideoElement | null>>>({});
   const imageRefs = useRef<{ [key: string]: HTMLImageElement | null }>({});
   const requestRef = useRef<number>(0);
   const webglLutRef = useRef<WebGLLUT | null>(null);
@@ -112,9 +118,14 @@ export const VideoPreview: React.FC<VideoPreviewProps> = ({
   }, []);
 
   // Get active clips for each visible track
+  const previewClips = useMemo(
+    () => (isRecordingActive && recordingSession ? recordingSession.originalClips : clips),
+    [clips, isRecordingActive, recordingSession],
+  );
+
   const activeClips = useMemo(() => {
     const visibleTrackIds = tracks.filter(t => t.isVisible).map(t => t.id);
-    return clips.filter(clip =>
+    return previewClips.filter(clip =>
       visibleTrackIds.includes(clip.trackId) &&
       currentTime >= clip.timelinePosition.start &&
       currentTime <= clip.timelinePosition.end
@@ -123,7 +134,7 @@ export const VideoPreview: React.FC<VideoPreviewProps> = ({
       const indexB = tracks.findIndex(t => t.id === b.trackId);
       return indexB - indexA; // Bottom tracks first for canvas drawing
     });
-  }, [clips, tracks, currentTime]);
+  }, [previewClips, tracks, currentTime]);
 
   // Main rendering loop
   const render = useCallback((force = false) => {
@@ -154,20 +165,8 @@ export const VideoPreview: React.FC<VideoPreviewProps> = ({
       const track = tracks.find(t => t.id === clip.trackId);
       if (!track || !track.isVisible) return;
 
-      const transform = {
-        position: { x: 0, y: 0, z: 0 },
-        rotation: 0,
-        flipHorizontal: false,
-        flipVertical: false,
-        scale: { x: 1, y: 1 },
-        opacity: 1,
-        crop: { top: 0, right: 0, bottom: 0, left: 0 },
-        ...(clip.transform || {})
-      };
-      
-      const rotation = typeof transform.rotation === 'number' 
-        ? transform.rotation 
-        : (transform.rotation as any)?.z || 0;
+      const transform = resolveClipTransformForRender(clip.transform, PLAYBACK_WIDTH, PLAYBACK_HEIGHT);
+      const rotation = transform.rotation;
 
       oCtx.save();
       oCtx.translate(PLAYBACK_WIDTH / 2 + (transform.position.x || 0), PLAYBACK_HEIGHT / 2 + (transform.position.y || 0));
@@ -187,10 +186,13 @@ export const VideoPreview: React.FC<VideoPreviewProps> = ({
         
         if (isReady && !hasError) {
           const crop = transform.crop || { top: 0, right: 0, bottom: 0, left: 0 };
-          const sx = (crop.left / 100) * video.videoWidth;
-          const sy = (crop.top / 100) * video.videoHeight;
-          const sw = video.videoWidth * (1 - (crop.left + crop.right) / 100);
-          const sh = video.videoHeight * (1 - (crop.top + crop.bottom) / 100);
+          const renderMetrics = getAspectFitRenderMetrics(
+            video.videoWidth,
+            video.videoHeight,
+            PLAYBACK_WIDTH,
+            PLAYBACK_HEIGHT,
+            crop,
+          );
 
           const parentTrack = track.parentId ? tracks.find(t => t.id === track.parentId) : null;
           const effectiveTrack = parentTrack || track;
@@ -223,17 +225,58 @@ export const VideoPreview: React.FC<VideoPreviewProps> = ({
                   useRect ? clip.overlayRect : undefined,
                   video.videoWidth,
                   video.videoHeight,
-                  transform.crop
+                  transform.crop,
+                  renderMetrics
                 );
-                oCtx.drawImage(lutProcessingCanvasRef.current!, -PLAYBACK_WIDTH/2, -PLAYBACK_HEIGHT/2, PLAYBACK_WIDTH, PLAYBACK_HEIGHT);
+                oCtx.drawImage(
+                  lutProcessingCanvasRef.current!,
+                  0,
+                  0,
+                  PLAYBACK_WIDTH,
+                  PLAYBACK_HEIGHT,
+                  -PLAYBACK_WIDTH / 2,
+                  -PLAYBACK_HEIGHT / 2,
+                  PLAYBACK_WIDTH,
+                  PLAYBACK_HEIGHT,
+                );
               } else {
-                oCtx.drawImage(video, sx, sy, sw, sh, -PLAYBACK_WIDTH/2, -PLAYBACK_HEIGHT/2, PLAYBACK_WIDTH, PLAYBACK_HEIGHT);
+                oCtx.drawImage(
+                  video,
+                  renderMetrics.sx,
+                  renderMetrics.sy,
+                  renderMetrics.sw,
+                  renderMetrics.sh,
+                  renderMetrics.dx,
+                  renderMetrics.dy,
+                  renderMetrics.dw,
+                  renderMetrics.dh,
+                );
               }
             } else {
-              oCtx.drawImage(video, sx, sy, sw, sh, -PLAYBACK_WIDTH/2, -PLAYBACK_HEIGHT/2, PLAYBACK_WIDTH, PLAYBACK_HEIGHT);
+              oCtx.drawImage(
+                video,
+                renderMetrics.sx,
+                renderMetrics.sy,
+                renderMetrics.sw,
+                renderMetrics.sh,
+                renderMetrics.dx,
+                renderMetrics.dy,
+                renderMetrics.dw,
+                renderMetrics.dh,
+              );
             }
           } else {
-            oCtx.drawImage(video, sx, sy, sw, sh, -PLAYBACK_WIDTH/2, -PLAYBACK_HEIGHT/2, PLAYBACK_WIDTH, PLAYBACK_HEIGHT);
+            oCtx.drawImage(
+              video,
+              renderMetrics.sx,
+              renderMetrics.sy,
+              renderMetrics.sw,
+              renderMetrics.sh,
+              renderMetrics.dx,
+              renderMetrics.dy,
+              renderMetrics.dw,
+              renderMetrics.dh,
+            );
           }
         }
         
@@ -242,35 +285,51 @@ export const VideoPreview: React.FC<VideoPreviewProps> = ({
         }
       } else if (clip.type === TrackType.IMAGE) {
         const img = imageRefs.current[clip.id];
-        if (img && img.complete) {
+        const sourceWidth = img?.naturalWidth || 0;
+        const sourceHeight = img?.naturalHeight || 0;
+        if (img && img.complete && sourceWidth > 0 && sourceHeight > 0) {
           const crop = transform.crop || { top: 0, right: 0, bottom: 0, left: 0 };
-          const sx = (crop.left / 100) * img.width;
-          const sy = (crop.top / 100) * img.height;
-          const sw = img.width * (1 - (crop.left + crop.right) / 100);
-          const sh = img.height * (1 - (crop.top + crop.bottom) / 100);
-          oCtx.drawImage(img, sx, sy, sw, sh, -PLAYBACK_WIDTH/2, -PLAYBACK_HEIGHT/2, PLAYBACK_WIDTH, PLAYBACK_HEIGHT);
+          const renderMetrics = getAspectFitRenderMetrics(
+            sourceWidth,
+            sourceHeight,
+            PLAYBACK_WIDTH,
+            PLAYBACK_HEIGHT,
+            crop,
+          );
+          oCtx.drawImage(
+            img,
+            renderMetrics.sx,
+            renderMetrics.sy,
+            renderMetrics.sw,
+            renderMetrics.sh,
+            renderMetrics.dx,
+            renderMetrics.dy,
+            renderMetrics.dw,
+            renderMetrics.dh,
+          );
         }
       } else if (clip.type === TrackType.TEXT || clip.type === TrackType.SUBTITLE) {
-        const baseFontSize = clip.style?.fontSize || 48;
-        const playbackFontSize = baseFontSize * (PLAYBACK_WIDTH / 1280);
-        
-        oCtx.font = `${clip.style?.fontWeight || 'normal'} ${playbackFontSize}px ${clip.style?.fontFamily || 'sans-serif'}`;
-        oCtx.fillStyle = clip.style?.color || '#ffffff';
+        const textMetrics = buildTextRenderMetrics(clip, PLAYBACK_WIDTH, PLAYBACK_HEIGHT);
+
+        oCtx.font = textMetrics.font;
+        oCtx.fillStyle = textMetrics.fillStyle;
         oCtx.textAlign = 'center';
         oCtx.textBaseline = 'middle';
 
-        if (clip.type === TrackType.SUBTITLE || (clip.style?.backgroundColor && clip.style.backgroundColor !== 'transparent')) {
+        if (clip.type === TrackType.SUBTITLE || (textMetrics.backgroundColor && textMetrics.backgroundColor !== 'transparent')) {
           const textWidth = oCtx.measureText(clip.content || '').width;
-          oCtx.fillStyle = clip.style?.backgroundColor || 'rgba(0,0,0,0.6)';
-          const paddingX = 16 * (PLAYBACK_WIDTH / 1280);
-          const paddingY = 8 * (PLAYBACK_WIDTH / 1280);
+          oCtx.fillStyle = textMetrics.backgroundColor || 'rgba(0,0,0,0.6)';
           
-          oCtx.fillRect(-textWidth/2 - paddingX, -playbackFontSize/2 - paddingY, textWidth + paddingX*2, playbackFontSize + paddingY*2);
-          oCtx.fillStyle = clip.style?.color || '#ffffff';
+          oCtx.fillRect(
+            -textWidth / 2 - textMetrics.paddingX,
+            -textMetrics.fontSize / 2 - textMetrics.paddingY,
+            textWidth + textMetrics.paddingX * 2,
+            textMetrics.fontSize + textMetrics.paddingY * 2,
+          );
+          oCtx.fillStyle = textMetrics.fillStyle;
         }
-        
-        const offsetY = clip.type === TrackType.SUBTITLE ? (720/2 - 80) * (PLAYBACK_HEIGHT/720) : 0;
-        oCtx.fillText(clip.content || '', 0, offsetY);
+
+        oCtx.fillText(clip.content || '', 0, textMetrics.offsetY);
       }
 
       oCtx.restore();
@@ -281,8 +340,10 @@ export const VideoPreview: React.FC<VideoPreviewProps> = ({
     }
   }, [activeClips, tracks, isPlaying, offscreenCanvas, lutDataMap, showLutPreview, useWebGPU, lutTextures, isRendererInitialized]);
 
-  // Force a render when any video element is ready
-  const handleVideoReady = useCallback(() => {
+  // Force a render when any media element becomes ready.
+  // Images need the same invalidation path as video clips so the canvas redraws
+  // as soon as the blob finishes loading.
+  const handleMediaReady = useCallback(() => {
     if (!isPlaying) {
       render(true);
     }
@@ -296,7 +357,7 @@ export const VideoPreview: React.FC<VideoPreviewProps> = ({
   }, [isRendererInitialized, isPlaying, render]);
 
   useEffect(() => {
-    clips.forEach((clip) => {
+    previewClips.forEach((clip) => {
       if (clip.type !== TrackType.VIDEO && clip.type !== TrackType.AUDIO && clip.type !== TrackType.SCREEN) return;
       
       const video = videoRefs.current[clip.id];
@@ -334,7 +395,7 @@ export const VideoPreview: React.FC<VideoPreviewProps> = ({
     if (!isPlaying) {
       render(true);
     }
-  }, [activeClips, currentTime, isPlaying, clips, tracks, render]);
+  }, [activeClips, currentTime, isPlaying, previewClips, tracks, render]);
 
   const renderRef = useRef(render);
   useEffect(() => {
@@ -362,11 +423,11 @@ export const VideoPreview: React.FC<VideoPreviewProps> = ({
   }, [isPlaying]);
 
   const pooledClips = useMemo(() => {
-    return clips.filter(clip => 
+    return previewClips.filter(clip => 
       currentTime >= clip.timelinePosition.start - BUFFER_WINDOW &&
       currentTime <= clip.timelinePosition.end + BUFFER_WINDOW
     );
-  }, [clips, currentTime]);
+  }, [previewClips, currentTime]);
 
   return (
     <div 
@@ -401,13 +462,13 @@ export const VideoPreview: React.FC<VideoPreviewProps> = ({
                 muted
                 preload="auto"
                 crossOrigin="anonymous"
-                onSeeked={handleVideoReady}
-                onLoadedData={handleVideoReady}
-                onLoadedMetadata={handleVideoReady}
-                onCanPlay={handleVideoReady}
-                onCanPlayThrough={handleVideoReady}
-                onPlaying={handleVideoReady}
-                onWaiting={handleVideoReady}
+                onSeeked={handleMediaReady}
+                onLoadedData={handleMediaReady}
+                onLoadedMetadata={handleMediaReady}
+                onCanPlay={handleMediaReady}
+                onCanPlayThrough={handleMediaReady}
+                onPlaying={handleMediaReady}
+                onWaiting={handleMediaReady}
               />
             );
           }
@@ -416,9 +477,11 @@ export const VideoPreview: React.FC<VideoPreviewProps> = ({
               <img
                 key={clip.id}
                 ref={(el) => (imageRefs.current[clip.id] = el)}
-                src={clip.thumbnailUrl}
+                src={clip.thumbnailUrl || clip.videoUrl || ''}
                 crossOrigin="anonymous"
                 referrerPolicy="no-referrer"
+                onLoad={handleMediaReady}
+                onError={handleMediaReady}
               />
             );
           }

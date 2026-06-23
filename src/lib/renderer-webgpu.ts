@@ -2,7 +2,7 @@
 /// <reference types="@webgpu/types" />
 
 import { Track, TrackType, VideoClip } from '../types';
-import { COMPOSITE_SHADER } from './export-shared';
+import { COMPOSITE_SHADER, getAspectFitRenderMetrics } from './export-shared';
 
 export class WebGPURenderer {
   private device: GPUDevice | null = null;
@@ -178,18 +178,8 @@ export class WebGPURenderer {
       const rotation = (typeof transform.rotation === 'number' ? transform.rotation : (transform.rotation as any)?.z || 0) * Math.PI / 180;
       const cos = Math.cos(rotation);
       const sin = Math.sin(rotation);
-      const sx = (transform.scale?.x || 1) * (transform.flipHorizontal ? -1 : 1);
-      const sy = (transform.scale?.y || 1) * (transform.flipVertical ? -1 : 1);
       const tx = (transform.position.x || 0) / (this.width / 2); 
       const ty = -(transform.position.y || 0) / (this.height / 2); 
-
-      uniformData.fill(0);
-      uniformData[0] = sx * cos; uniformData[1] = sx * sin; uniformData[2] = 0; uniformData[3] = 0;
-      uniformData[4] = -sy * sin; uniformData[5] = sy * cos; uniformData[6] = 0; uniformData[7] = 0;
-      uniformData[8] = tx; uniformData[9] = ty; uniformData[10] = 1; uniformData[11] = 0;
-      
-      uniformData[12] = transform.opacity;
-      uniformData[13] = effectiveTrack.lutConfig?.intensity ?? 1;
       
       let hasLut = (showLutPreview && effectiveTrack.lutConfig?.enabled && lutTextures[effectiveTrack.id]) ? 1 : 0;
       let isOverlay = 0;
@@ -204,23 +194,7 @@ export class WebGPURenderer {
         hasLut = 0;
       }
       
-      const uintView = new Uint32Array(uniformData.buffer);
-      uintView[14] = hasLut;
-      uintView[15] = isOverlay;
-
-      if (clip.overlayRect) {
-        const scaleX = this.width / 1920;
-        const scaleY = this.height / 1080;
-        uniformData[16] = clip.overlayRect.x * scaleX;
-        uniformData[17] = clip.overlayRect.y * scaleY;
-        uniformData[18] = clip.overlayRect.width * scaleX;
-        uniformData[19] = clip.overlayRect.height * scaleY;
-      }
-
       const crop = transform.crop || { top: 0, right: 0, bottom: 0, left: 0 };
-      uniformData.set([crop.top, crop.right, crop.bottom, crop.left], 20);
-
-      this.device.queue.writeBuffer(this.uniformBuffer!, 0, uniformData);
 
       if (clip.type === TrackType.VIDEO || clip.type === TrackType.SCREEN) {
         const video = videoRefs[clip.id];
@@ -230,6 +204,30 @@ export class WebGPURenderer {
 
         if (video && (isVideoFrame || ((video as HTMLVideoElement).readyState >= 2 && sourceWidth > 0))) {
           try {
+            const aspectFit = getAspectFitRenderMetrics(sourceWidth, sourceHeight, this.width, this.height, crop);
+            const sx = aspectFit.scaleX * (transform.scale?.x || 1) * (transform.flipHorizontal ? -1 : 1);
+            const sy = aspectFit.scaleY * (transform.scale?.y || 1) * (transform.flipVertical ? -1 : 1);
+
+            uniformData.fill(0);
+            uniformData[0] = sx * cos; uniformData[1] = sx * sin; uniformData[2] = 0; uniformData[3] = 0;
+            uniformData[4] = -sy * sin; uniformData[5] = sy * cos; uniformData[6] = 0; uniformData[7] = 0;
+            uniformData[8] = tx; uniformData[9] = ty; uniformData[10] = 1; uniformData[11] = 0;
+            uniformData[12] = transform.opacity;
+            uniformData[13] = effectiveTrack.lutConfig?.intensity ?? 1;
+            const uintView = new Uint32Array(uniformData.buffer);
+            uintView[14] = hasLut;
+            uintView[15] = isOverlay;
+            if (clip.overlayRect) {
+              const scaleX = this.width / 1920;
+              const scaleY = this.height / 1080;
+              uniformData[16] = clip.overlayRect.x * scaleX;
+              uniformData[17] = clip.overlayRect.y * scaleY;
+              uniformData[18] = clip.overlayRect.width * scaleX;
+              uniformData[19] = clip.overlayRect.height * scaleY;
+            }
+            uniformData.set([crop.top, crop.right, crop.bottom, crop.left], 20);
+            this.device.queue.writeBuffer(this.uniformBuffer!, 0, uniformData);
+
             const videoTexture = this.device.importExternalTexture({ source: video });
             const lutTexture = (hasLut && lutTextures[effectiveTrack.id]) 
               ? lutTextures[effectiveTrack.id] 
@@ -262,6 +260,30 @@ export class WebGPURenderer {
         const sourceHeight = isImageBitmap ? img.height : (img as HTMLImageElement | null)?.naturalHeight ?? 0;
         if (img && (isImageBitmap || ((img as HTMLImageElement).complete && sourceWidth > 0))) {
           try {
+            const aspectFit = getAspectFitRenderMetrics(sourceWidth, sourceHeight, this.width, this.height, crop);
+            const sx = aspectFit.scaleX * (transform.scale?.x || 1) * (transform.flipHorizontal ? -1 : 1);
+            const sy = aspectFit.scaleY * (transform.scale?.y || 1) * (transform.flipVertical ? -1 : 1);
+
+            uniformData.fill(0);
+            uniformData[0] = sx * cos; uniformData[1] = sx * sin; uniformData[2] = 0; uniformData[3] = 0;
+            uniformData[4] = -sy * sin; uniformData[5] = sy * cos; uniformData[6] = 0; uniformData[7] = 0;
+            uniformData[8] = tx; uniformData[9] = ty; uniformData[10] = 1; uniformData[11] = 0;
+            uniformData[12] = transform.opacity;
+            uniformData[13] = effectiveTrack.lutConfig?.intensity ?? 1;
+            const uintView = new Uint32Array(uniformData.buffer);
+            uintView[14] = hasLut;
+            uintView[15] = isOverlay;
+            if (clip.overlayRect) {
+              const scaleX = this.width / 1920;
+              const scaleY = this.height / 1080;
+              uniformData[16] = clip.overlayRect.x * scaleX;
+              uniformData[17] = clip.overlayRect.y * scaleY;
+              uniformData[18] = clip.overlayRect.width * scaleX;
+              uniformData[19] = clip.overlayRect.height * scaleY;
+            }
+            uniformData.set([crop.top, crop.right, crop.bottom, crop.left], 20);
+            this.device.queue.writeBuffer(this.uniformBuffer!, 0, uniformData);
+
             let imageTexture = this.imageTextureCache.get(clip.id);
             if (!imageTexture) {
               imageTexture = this.device.createTexture({

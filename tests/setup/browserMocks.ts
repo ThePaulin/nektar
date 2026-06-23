@@ -73,7 +73,43 @@ export function installBrowserMocks() {
     }
   }
 
-  const mediaTrack = { stop: noop };
+  class MockAudioContext {
+    state = 'running';
+
+    createMediaStreamSource() {
+      return {
+        connect: noop,
+      };
+    }
+
+    createAnalyser() {
+      return {
+        fftSize: 256,
+        frequencyBinCount: 128,
+        getByteFrequencyData: (data: Uint8Array) => data.fill(0),
+      };
+    }
+
+    createMediaStreamDestination() {
+      return {
+        stream: mediaStream,
+      };
+    }
+
+    resume() {
+      return Promise.resolve();
+    }
+
+    close() {
+      return Promise.resolve();
+    }
+  }
+
+  const mediaTrack = {
+    addEventListener: noop,
+    removeEventListener: noop,
+    stop: noop,
+  };
   const mediaStream = {
     getTracks: () => [mediaTrack],
     getAudioTracks: () => [mediaTrack],
@@ -83,6 +119,34 @@ export function installBrowserMocks() {
   const mediaDevices = {
     getUserMedia: vi.fn().mockResolvedValue(mediaStream),
     getDisplayMedia: vi.fn().mockResolvedValue(mediaStream),
+    enumerateDevices: vi.fn().mockResolvedValue([
+      {
+        deviceId: 'camera-1',
+        groupId: 'group-camera-1',
+        kind: 'videoinput',
+        label: 'FaceTime Camera',
+      },
+      {
+        deviceId: 'camera-2',
+        groupId: 'group-camera-2',
+        kind: 'videoinput',
+        label: 'USB Camera',
+      },
+      {
+        deviceId: 'mic-1',
+        groupId: 'group-mic-1',
+        kind: 'audioinput',
+        label: 'Built-in Microphone',
+      },
+      {
+        deviceId: 'mic-2',
+        groupId: 'group-mic-2',
+        kind: 'audioinput',
+        label: 'USB Microphone',
+      },
+    ]),
+    addEventListener: vi.fn(),
+    removeEventListener: vi.fn(),
   };
 
   Object.defineProperty(globalThis, 'Worker', {
@@ -95,6 +159,12 @@ export function installBrowserMocks() {
     configurable: true,
     writable: true,
     value: MockMediaRecorder,
+  });
+
+  Object.defineProperty(globalThis, 'AudioContext', {
+    configurable: true,
+    writable: true,
+    value: MockAudioContext,
   });
 
   Object.defineProperty(globalThis.navigator, 'mediaDevices', {
@@ -118,6 +188,12 @@ export function installBrowserMocks() {
     configurable: true,
     writable: true,
     value: vi.fn(),
+  });
+
+  Object.defineProperty(HTMLMediaElement.prototype, 'play', {
+    configurable: true,
+    writable: true,
+    value: vi.fn().mockResolvedValue(undefined),
   });
 
   Object.defineProperty(window, 'ResizeObserver', {
