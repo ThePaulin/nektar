@@ -86,6 +86,7 @@ export type VideoObjType = VideoClip[];
 
 export type RecordingMode = 'insert' | 'append';
 export type RecordingSource = 'camera' | 'screen' | 'overlay';
+export type RecordingAudioSource = 'microphone' | 'system';
 
 export interface RecordingOverlayRect {
   x: number;

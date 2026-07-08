@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 const jobRegistry = new Map();
+const ffmpegEncoderCache = new Map();
 function sanitizeFileName(value) {
     return value.replace(/[^a-zA-Z0-9._-]+/g, '_');
 }
@@ -107,14 +108,8 @@ async function materializeAssets(request, workspaceDir, handlers, jobId) {
     const assetsDir = path.join(workspaceDir, 'assets');
     await mkdir(assetsDir, { recursive: true });
     const materialized = new Map();
-    for (let index = 0; index < request.assets.length; index += 1) {
-        const asset = request.assets[index];
-        handlers.emitProgress({
-            jobId,
-            progress: Math.min(0.25, (index + 1) / Math.max(request.assets.length, 1) * 0.25),
-            stage: asset.buffer ? 'materialize' : 'download',
-            message: `Preparing ${asset.originalName}`,
-        });
+    let completedAssets = 0;
+    await Promise.all(request.assets.map(async (asset) => {
         const baseName = sanitizeFileName(asset.originalName || asset.assetId);
         const ext = inferExtension(baseName, asset.mimeType);
         const digest = createHash('sha1').update(asset.assetId).digest('hex').slice(0, 12);
@@ -128,13 +123,50 @@ async function materializeAssets(request, workspaceDir, handlers, jobId) {
         else {
             throw new Error(`Asset ${asset.assetId} is missing both local data and a source URL.`);
         }
+        completedAssets += 1;
+        handlers.emitProgress({
+            jobId,
+            progress: Math.min(0.25, completedAssets / Math.max(request.assets.length, 1) * 0.25),
+            stage: asset.buffer ? 'materialize' : 'download',
+            message: `Prepared ${asset.originalName}`,
+        });
         materialized.set(asset.assetId, {
             assetId: asset.assetId,
             filePath,
             kind: asset.kind,
         });
-    }
+    }));
     return materialized;
+}
+function detectFfmpegEncoders(ffmpegPath) {
+    let cached = ffmpegEncoderCache.get(ffmpegPath);
+    if (!cached) {
+        cached = new Promise((resolve) => {
+            const ffmpeg = spawn(ffmpegPath, ['-hide_banner', '-encoders'], {
+                stdio: ['ignore', 'pipe', 'pipe'],
+            });
+            let output = '';
+            ffmpeg.stdout.on('data', (chunk) => {
+                output += chunk.toString('utf8');
+            });
+            ffmpeg.stderr.on('data', (chunk) => {
+                output += chunk.toString('utf8');
+            });
+            ffmpeg.on('error', () => resolve(new Set()));
+            ffmpeg.on('close', () => {
+                const encoders = new Set();
+                for (const line of output.split(/\r?\n/)) {
+                    const match = line.match(/^\s*[VAS.][A-Z.]{5}\s+(\S+)/);
+                    if (match?.[1]) {
+                        encoders.add(match[1]);
+                    }
+                }
+                resolve(encoders);
+            });
+        });
+        ffmpegEncoderCache.set(ffmpegPath, cached);
+    }
+    return cached;
 }
 function ffmpegEscapeText(value) {
     return value
@@ -149,6 +181,9 @@ function codecLooksLikeAudio(codec) {
 }
 function formatScaleMultiplier(value) {
     return Number.isFinite(value) ? value.toFixed(6).replace(/\.?0+$/, '') : '1';
+}
+function formatFfmpegSeconds(value) {
+    return Number.isFinite(value) ? Math.max(0, value).toFixed(6).replace(/\.?0+$/, '') : '0';
 }
 function assetHasAudioStream(request, asset) {
     if (asset.kind === 'audio')
@@ -169,7 +204,7 @@ function assetHasAudioStream(request, asset) {
         return true;
     return codecs.some(codecLooksLikeAudio);
 }
-export function buildFfmpegCommand({ request, materializedAssets, outputPath, }) {
+export function buildFfmpegCommand({ request, materializedAssets, outputPath, availableEncoders, }) {
     const inputArgs = [];
     const filterParts = [];
     const activeTracks = request.tracks.filter((track) => track.isVisible);
@@ -211,9 +246,18 @@ export function buildFfmpegCommand({ request, materializedAssets, outputPath, })
         const asset = materializedAssets.get(clip.assetRef.assetId);
         if (!asset)
             continue;
-        inputArgs.push('-i', asset.filePath);
         const trimStart = Math.max(0, clip.sourceStart + Math.max(0, request.range.start - clip.timelinePosition.start));
         const visibleDuration = Math.min(request.range.end, clip.timelinePosition.end) - Math.max(request.range.start, clip.timelinePosition.start);
+        if (visibleDuration <= 0)
+            continue;
+        const track = request.tracks.find((entry) => entry.id === clip.trackId);
+        const volume = track?.isMuted ? 0 : clip.volume;
+        if (asset.kind === 'audio' && (track?.isMuted || volume <= 0))
+            continue;
+        if (asset.kind !== 'image') {
+            inputArgs.push('-ss', formatFfmpegSeconds(trimStart), '-t', formatFfmpegSeconds(visibleDuration));
+        }
+        inputArgs.push('-i', asset.filePath);
         const offset = Math.max(0, Math.round((Math.max(request.range.start, clip.timelinePosition.start) - request.range.start) * 1000));
         const opacity = clip.transform?.opacity ?? 1;
         const scaleX = clip.transform?.scale.x ?? 1;
@@ -229,10 +273,10 @@ export function buildFfmpegCommand({ request, materializedAssets, outputPath, })
             const baseLabel = `vclipbase${clip.id}`;
             const videoFilterSegments = [];
             if (asset.kind === 'video') {
-                videoFilterSegments.push(`trim=start=${trimStart}:duration=${visibleDuration}`, 'setpts=PTS-STARTPTS');
+                videoFilterSegments.push(`trim=duration=${formatFfmpegSeconds(visibleDuration)}`, 'setpts=PTS-STARTPTS');
             }
             else {
-                videoFilterSegments.push(`loop=loop=-1:size=1:start=0`, `trim=duration=${visibleDuration}`, 'setpts=PTS-STARTPTS');
+                videoFilterSegments.push(`loop=loop=-1:size=1:start=0`, `trim=duration=${formatFfmpegSeconds(visibleDuration)}`, 'setpts=PTS-STARTPTS');
             }
             if (crop && (crop.top || crop.right || crop.bottom || crop.left)) {
                 const widthExpr = `iw*(1-${(crop.left + crop.right) / 100})`;
@@ -265,9 +309,9 @@ export function buildFfmpegCommand({ request, materializedAssets, outputPath, })
             layerIndex += 1;
         }
         if (asset.kind !== 'image' && assetHasAudioStream(request, asset)) {
-            const track = request.tracks.find((entry) => entry.id === clip.trackId);
-            const volume = track?.isMuted ? 0 : clip.volume;
-            filterParts.push(`[${currentInput}:a]atrim=start=${trimStart}:duration=${visibleDuration},asetpts=PTS-STARTPTS,volume=${volume},adelay=${offset}|${offset}[a${clip.id}]`);
+            if (track?.isMuted || volume <= 0)
+                continue;
+            filterParts.push(`[${currentInput}:a]atrim=duration=${formatFfmpegSeconds(visibleDuration)},asetpts=PTS-STARTPTS,volume=${volume},adelay=${offset}|${offset}[a${clip.id}]`);
             audioLabels.push(`[a${clip.id}]`);
         }
     }
@@ -286,10 +330,15 @@ export function buildFfmpegCommand({ request, materializedAssets, outputPath, })
         args.push('-map', '[aout]');
     }
     if (request.format === 'mp4') {
-        args.push('-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-preset', 'fast', '-c:a', 'aac');
+        if (availableEncoders?.has('h264_videotoolbox')) {
+            args.push('-c:v', 'h264_videotoolbox', '-b:v', '12M', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '160k');
+        }
+        else {
+            args.push('-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-preset', 'veryfast', '-crf', '23', '-c:a', 'aac', '-b:a', '160k');
+        }
     }
     else {
-        args.push('-c:v', 'libvpx-vp9', '-b:v', '12M', '-c:a', 'libopus');
+        args.push('-c:v', 'libvpx-vp9', '-b:v', '12M', '-deadline', 'realtime', '-cpu-used', '6', '-row-mt', '1', '-c:a', 'libopus', '-b:a', '160k');
     }
     args.push('-y', outputPath);
     return args;
@@ -351,7 +400,8 @@ export async function startDesktopExport(request, handlers) {
     };
     await writeFile(path.join(workspaceDir, 'manifest.json'), JSON.stringify(manifest, null, 2), 'utf8');
     emitProgress({ progress: 0.3, stage: 'ffmpeg', message: 'Starting FFmpeg export' });
-    const args = buildFfmpegCommand({ request, materializedAssets, outputPath });
+    const availableEncoders = await detectFfmpegEncoders(ffmpegPath);
+    const args = buildFfmpegCommand({ request, materializedAssets, outputPath, availableEncoders });
     const ffmpeg = spawn(ffmpegPath, ['-progress', 'pipe:1', '-nostats', ...args], {
         cwd: workspaceDir,
         stdio: ['ignore', 'pipe', 'pipe'],

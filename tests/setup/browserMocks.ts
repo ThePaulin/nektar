@@ -110,6 +110,35 @@ export function installBrowserMocks() {
     removeEventListener: noop,
     stop: noop,
   };
+  class MockMediaStream {
+    private readonly tracks: Array<any>;
+
+    constructor(tracks: Array<any> = [mediaTrack]) {
+      this.tracks = tracks;
+    }
+
+    getTracks() {
+      return this.tracks;
+    }
+
+    getAudioTracks() {
+      return this.tracks.filter((track) => track.kind !== 'video');
+    }
+
+    getVideoTracks() {
+      return this.tracks.filter((track) => track.kind !== 'audio');
+    }
+
+    addTrack(track: any) {
+      this.tracks.push(track);
+    }
+
+    removeTrack(track: any) {
+      const index = this.tracks.indexOf(track);
+      if (index !== -1) this.tracks.splice(index, 1);
+    }
+  }
+
   const mediaStream = {
     getTracks: () => [mediaTrack],
     getAudioTracks: () => [mediaTrack],
@@ -161,6 +190,12 @@ export function installBrowserMocks() {
     value: MockMediaRecorder,
   });
 
+  Object.defineProperty(globalThis, 'MediaStream', {
+    configurable: true,
+    writable: true,
+    value: MockMediaStream,
+  });
+
   Object.defineProperty(globalThis, 'AudioContext', {
     configurable: true,
     writable: true,
@@ -194,6 +229,12 @@ export function installBrowserMocks() {
     configurable: true,
     writable: true,
     value: vi.fn().mockResolvedValue(undefined),
+  });
+
+  Object.defineProperty(HTMLMediaElement.prototype, 'load', {
+    configurable: true,
+    writable: true,
+    value: vi.fn(),
   });
 
   Object.defineProperty(window, 'ResizeObserver', {

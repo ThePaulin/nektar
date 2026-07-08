@@ -13,15 +13,8 @@ export interface DisplaySourceOption {
   name: string;
 }
 
-export interface CameraStreamResult {
-  stream: MediaStream;
-  microphoneAvailable: boolean;
-  audioWarning: string | null;
-}
-
 export interface CameraStreamOptions {
   cameraDeviceId?: string | null;
-  microphoneDeviceId?: string | null;
 }
 
 export interface MicrophoneStreamOptions {
@@ -30,11 +23,23 @@ export interface MicrophoneStreamOptions {
 
 export interface ScreenStreamOptions {
   displaySourceId?: string | null;
+  includeSystemAudio?: boolean;
+}
+
+export interface ScreenStreamResult {
+  videoStream: MediaStream;
+  systemAudioStream?: MediaStream;
+  systemAudioWarning?: string | null;
 }
 
 const CAMERA_CONSTRAINTS: MediaTrackConstraints = {
   width: { ideal: 1280 },
   height: { ideal: 720 },
+  aspectRatio: { ideal: 16 / 9 },
+  // Camera-class UVC devices such as the DJI Osmo Pocket 3 advertise higher
+  // frame-rate modes that are not decoded reliably by every Chromium build.
+  // Prefer their broadly supported 30 fps mode for capture and preview.
+  frameRate: { ideal: 30, max: 30 },
 };
 
 const MICROPHONE_CONSTRAINTS: MediaTrackConstraints = {
@@ -172,7 +177,7 @@ async function ensureDesktopMediaAccess(kind: 'camera' | 'microphone') {
   }
 }
 
-export async function requestCameraStream(options: CameraStreamOptions = {}): Promise<CameraStreamResult> {
+export async function requestCameraStream(options: CameraStreamOptions = {}) {
   const mediaDevices = getUserMediaDevices();
   let videoStream: MediaStream | null = null;
 
@@ -192,36 +197,7 @@ export async function requestCameraStream(options: CameraStreamOptions = {}): Pr
     throw new Error('No video track was returned for the selected camera source.');
   }
 
-  try {
-    await ensureDesktopMediaAccess('microphone');
-    const audioStream = await mediaDevices.getUserMedia({
-      video: false,
-      audio: withDeviceId(MICROPHONE_CONSTRAINTS, options.microphoneDeviceId),
-    });
-
-    const audioTracks = audioStream.getAudioTracks();
-    if (audioTracks.length === 0) {
-      stopStream(audioStream);
-      return {
-        stream: videoStream,
-        microphoneAvailable: false,
-        audioWarning: 'Camera access is ready, but no microphone track was provided.',
-      };
-    }
-
-    audioTracks.forEach((track) => videoStream.addTrack(track));
-    return {
-      stream: videoStream,
-      microphoneAvailable: true,
-      audioWarning: null,
-    };
-  } catch (error) {
-    return {
-      stream: videoStream,
-      microphoneAvailable: false,
-      audioWarning: describeMediaPermissionError(error, 'microphone'),
-    };
-  }
+  return videoStream;
 }
 
 export async function requestMicrophoneStream(options: MicrophoneStreamOptions = {}) {
@@ -241,7 +217,7 @@ export async function requestMicrophoneStream(options: MicrophoneStreamOptions =
   return stream;
 }
 
-export async function requestScreenStream(isMacOS: boolean, options: ScreenStreamOptions = {}) {
+export async function requestScreenStream(_isMacOS: boolean, options: ScreenStreamOptions = {}): Promise<ScreenStreamResult> {
   const mediaDevices = getDisplayMediaDevices();
   await window.nektarDesktop?.desktopSystem?.setDisplaySource?.(options.displaySourceId ?? null);
 
@@ -249,18 +225,20 @@ export async function requestScreenStream(isMacOS: boolean, options: ScreenStrea
     video: {
       cursor: 'always',
     } as MediaTrackConstraints,
-    audio: isMacOS ? false : MICROPHONE_CONSTRAINTS,
+    audio: options.includeSystemAudio ? true : false,
   };
 
   let stream: MediaStream;
+  let systemAudioWarning: string | null = null;
 
   try {
     stream = await mediaDevices.getDisplayMedia(constraints);
   } catch (error) {
-    if (isMacOS || constraints.audio === false) {
+    if (!options.includeSystemAudio) {
       throw error;
     }
 
+    systemAudioWarning = `System audio could not be captured. ${describeMediaPermissionError(error, 'screen')}`;
     stream = await mediaDevices.getDisplayMedia({
       ...constraints,
       audio: false,
@@ -272,5 +250,14 @@ export async function requestScreenStream(isMacOS: boolean, options: ScreenStrea
     throw new Error('No video track was returned for the selected screen source.');
   }
 
-  return stream;
+  const videoStream = new MediaStream(stream.getVideoTracks());
+  const audioTracks = stream.getAudioTracks();
+
+  return {
+    videoStream,
+    systemAudioStream: audioTracks.length > 0 ? new MediaStream(audioTracks) : undefined,
+    systemAudioWarning: options.includeSystemAudio
+      ? systemAudioWarning ?? (audioTracks.length === 0 ? 'System audio is unavailable for the selected screen source.' : null)
+      : null,
+  };
 }

@@ -172,7 +172,8 @@ describe('desktop ffmpeg command generation', () => {
 
     expect(args).toContain('/tmp/clip with spaces.mp4');
     expect(args).toContain('/tmp/output export.mp4');
-    expect(args.join(' ')).toContain('trim=start=2:duration=6');
+    expect(args.slice(0, 6)).toEqual(['-ss', '2', '-t', '6', '-i', '/tmp/clip with spaces.mp4']);
+    expect(args.join(' ')).toContain('trim=duration=6');
     expect(args.join(' ')).toContain('overlay=');
   });
 
@@ -238,8 +239,9 @@ describe('desktop ffmpeg command generation', () => {
     const serialized = args.join(' ');
     expect(serialized).toContain('drawtext=');
     expect(serialized).toContain('loop=loop=-1:size=1:start=0');
-    expect(serialized).toContain('volume=0');
-    expect(serialized).toContain('amix=inputs=1');
+    expect(serialized).not.toContain('/tmp/audio.wav');
+    expect(serialized).not.toContain('volume=0');
+    expect(serialized).not.toContain('amix=');
   });
 
   it('keeps lower-order tracks visually on top and skips audio filters for video-only assets', () => {
@@ -310,14 +312,63 @@ describe('desktop ffmpeg command generation', () => {
     });
 
     const filterGraph = args[args.indexOf('-filter_complex') + 1] as string;
-    expect(args.slice(0, 4)).toEqual(['-i', '/tmp/screen.mp4', '-i', '/tmp/camera.mp4']);
-    expect(filterGraph).toContain('[0:v]trim=');
-    expect(filterGraph).toContain('[1:v]trim=');
+    expect(args.slice(0, 10)).toEqual([
+      '-ss',
+      '0',
+      '-t',
+      '18',
+      '-i',
+      '/tmp/screen.mp4',
+      '-ss',
+      '0',
+      '-t',
+      '18',
+    ]);
+    expect(args.slice(10, 12)).toEqual(['-i', '/tmp/camera.mp4']);
+    expect(filterGraph).toContain('[0:v]trim=duration=18');
+    expect(filterGraph).toContain('[1:v]trim=duration=18');
     expect(filterGraph).toContain('crop=iw*(1-0.2):ih*(1-0):iw*0.1:ih*0');
     expect(filterGraph).not.toContain(',[vclip');
-    expect(filterGraph).toContain('[1:a]atrim=');
+    expect(filterGraph).toContain('[1:a]atrim=duration=18');
     expect(filterGraph).not.toContain('[0:a]atrim=');
     expect(filterGraph).toContain('amix=inputs=1');
     expect(filterGraph.indexOf('[0:v]trim=')).toBeLessThan(filterGraph.indexOf('[1:v]trim='));
+  });
+
+  it('uses hardware H.264 when FFmpeg reports a supported encoder', () => {
+    const request = {
+      format: 'mp4' as const,
+      width: 1920,
+      height: 1080,
+      fps: 30,
+      range: { start: 0, end: 5 },
+      tracks: [makeTrack()],
+      clips: [
+        {
+          id: 30,
+          trackId: 'track-1',
+          label: 'Main clip',
+          type: TrackType.VIDEO,
+          duration: 5,
+          sourceStart: 0,
+          timelinePosition: { start: 0, end: 5 },
+          volume: 1,
+          assetRef: { assetId: 'asset-1' },
+        },
+      ],
+      assets: [],
+    };
+
+    const args = buildFfmpegCommand({
+      request,
+      materializedAssets: new Map([
+        ['asset-1', { assetId: 'asset-1', filePath: '/tmp/clip.mp4', kind: 'video' }],
+      ]),
+      outputPath: '/tmp/output.mp4',
+      availableEncoders: new Set(['h264_videotoolbox']),
+    });
+
+    expect(args).toContain('h264_videotoolbox');
+    expect(args).not.toContain('libx264');
   });
 });

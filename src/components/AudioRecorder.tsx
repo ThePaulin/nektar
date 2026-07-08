@@ -25,6 +25,11 @@ interface AudioRecorderProps {
   isArmed?: boolean;
 }
 
+function getSelectedDeviceId<T extends { deviceId: string }>(current: string, devices: T[]) {
+  if (current && devices.some((device) => device.deviceId === current)) return current;
+  return devices[0]?.deviceId || '';
+}
+
 export const AudioRecorder: React.FC<AudioRecorderProps> = ({
   onRecordingComplete,
   onStartRecording,
@@ -116,7 +121,7 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({
     try {
       const { microphones } = await listRecordingDevices();
       setMicrophoneDevices(microphones);
-      setSelectedMicrophoneDeviceId((current) => current || microphones[0]?.deviceId || '');
+      setSelectedMicrophoneDeviceId((current) => getSelectedDeviceId(current, microphones));
     } catch (err) {
       console.error("Error listing microphone devices:", err);
     }

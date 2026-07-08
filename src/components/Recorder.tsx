@@ -1,8 +1,9 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { Camera, Square, Circle, X, Monitor, Layers, ChevronLeft, ChevronRight, ChevronUp, ChevronDown } from 'lucide-react';
+import { Camera, Square, Circle, X, Monitor, Layers, ChevronLeft, ChevronRight, ChevronUp, ChevronDown, Mic, Volume2, VolumeX, Settings } from 'lucide-react';
 
 import {
   RecordingCompletePayload,
+  RecordingAudioSource,
   RecordingOverlayRect,
   RecordingProgressPayload,
   RecordingSource,
@@ -18,6 +19,7 @@ import {
   MediaAccessStatus,
   RecordingDeviceOption,
   requestCameraStream,
+  requestMicrophoneStream,
   ScreenStreamOptions,
   requestScreenStream,
 } from '../lib/media-permissions';
@@ -38,6 +40,23 @@ interface RecorderProps {
 type OverlayX = 'left' | 'right';
 type OverlayY = 'top' | 'center' | 'bottom';
 
+interface RecordingAudioConfig {
+  enabled: boolean;
+  muted: boolean;
+  volume: number;
+  warning: string | null;
+}
+
+function getSelectedDeviceId<T extends { deviceId: string }>(current: string, devices: T[]) {
+  if (current && devices.some((device) => device.deviceId === current)) return current;
+  return devices[0]?.deviceId || '';
+}
+
+function getSelectedSourceId<T extends { id: string }>(current: string, sources: T[]) {
+  if (current && sources.some((source) => source.id === current)) return current;
+  return sources[0]?.id || '';
+}
+
 export const Recorder: React.FC<RecorderProps> = ({
   onRecordingComplete,
   onStartRecording,
@@ -52,10 +71,18 @@ export const Recorder: React.FC<RecorderProps> = ({
 }) => {
   const [isRecording, setIsRecording] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
+  const [isSettingsPanelOpen, setIsSettingsPanelOpen] = useState(false);
   const [cameraStream, setCameraStream] = useState<MediaStream | null>(null);
   const [screenStream, setScreenStream] = useState<MediaStream | null>(null);
+  const [microphoneStream, setMicrophoneStream] = useState<MediaStream | null>(null);
+  const [systemAudioStream, setSystemAudioStream] = useState<MediaStream | null>(null);
   const cameraStreamRef = useRef<MediaStream | null>(null);
   const screenStreamRef = useRef<MediaStream | null>(null);
+  const microphoneStreamRef = useRef<MediaStream | null>(null);
+  const systemAudioStreamRef = useRef<MediaStream | null>(null);
+  const isRecordingRef = useRef(false);
+  const isPausedRef = useRef(false);
+  const recordingSourceRef = useRef<RecordingSource>(trackType === TrackType.SCREEN ? 'screen' : 'camera');
   const [recordingSource, setRecordingSource] = useState<RecordingSource>(trackType === TrackType.SCREEN ? 'screen' : 'camera');
   const [overlayX, setOverlayX] = useState<OverlayX>('right');
   const [overlayY, setOverlayY] = useState<OverlayY>('bottom');
@@ -68,9 +95,11 @@ export const Recorder: React.FC<RecorderProps> = ({
   const accumulatedTimeRef = useRef<number>(0);
   const timerRef = useRef<number | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
+  const recordingAudioContextRef = useRef<AudioContext | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
   const animationFrameRef = useRef<number | null>(null);
   const compositionFrameRef = useRef<number | null>(null);
+  const cameraRestartTimerRef = useRef<number | null>(null);
   const workerRef = useRef<Worker | null>(null);
   const partialUrlsRef = useRef<Partial<Record<RecordingSource, string>>>({});
   const livePreviewStreamsRef = useRef<Partial<Record<RecordingSource, MediaStream>>>({});
@@ -81,9 +110,20 @@ export const Recorder: React.FC<RecorderProps> = ({
   const [selectedCameraDeviceId, setSelectedCameraDeviceId] = useState('');
   const [selectedMicrophoneDeviceId, setSelectedMicrophoneDeviceId] = useState('');
   const [selectedDisplaySourceId, setSelectedDisplaySourceId] = useState('');
+  const [microphoneConfig, setMicrophoneConfig] = useState<RecordingAudioConfig>({
+    enabled: true,
+    muted: false,
+    volume: 1,
+    warning: null,
+  });
+  const [systemAudioConfig, setSystemAudioConfig] = useState<RecordingAudioConfig>({
+    enabled: false,
+    muted: false,
+    volume: 1,
+    warning: null,
+  });
   const [screenAccessStatus, setScreenAccessStatus] = useState<MediaAccessStatus>('unknown');
   const [cameraError, setCameraError] = useState<string | null>(null);
-  const [microphoneWarning, setMicrophoneWarning] = useState<string | null>(null);
   const [screenError, setScreenError] = useState<string | null>(null);
   const [isRequestingAccess, setIsRequestingAccess] = useState(false);
   const isMacOS = /mac/i.test(navigator.userAgent);
@@ -112,6 +152,26 @@ export const Recorder: React.FC<RecorderProps> = ({
     screenStreamRef.current = screenStream;
   }, [screenStream]);
 
+  useEffect(() => {
+    isRecordingRef.current = isRecording;
+  }, [isRecording]);
+
+  useEffect(() => {
+    isPausedRef.current = isPaused;
+  }, [isPaused]);
+
+  useEffect(() => {
+    recordingSourceRef.current = recordingSource;
+  }, [recordingSource]);
+
+  useEffect(() => {
+    microphoneStreamRef.current = microphoneStream;
+  }, [microphoneStream]);
+
+  useEffect(() => {
+    systemAudioStreamRef.current = systemAudioStream;
+  }, [systemAudioStream]);
+
   const revokePartialUrls = useCallback(() => {
     (Object.values(partialUrlsRef.current) as Array<string | undefined>).forEach((url) => {
       if (url) URL.revokeObjectURL(url);
@@ -130,29 +190,53 @@ export const Recorder: React.FC<RecorderProps> = ({
       screenStreamRef.current = null;
       setScreenStream(null);
     }
+    if (microphoneStreamRef.current) {
+      microphoneStreamRef.current.getTracks().forEach(track => track.stop());
+      microphoneStreamRef.current = null;
+      setMicrophoneStream(null);
+    }
+    if (systemAudioStreamRef.current) {
+      systemAudioStreamRef.current.getTracks().forEach(track => track.stop());
+      systemAudioStreamRef.current = null;
+      setSystemAudioStream(null);
+    }
   }, []);
 
   const stopScreenStream = useCallback(() => {
-    if (!screenStreamRef.current) return;
-    screenStreamRef.current.getTracks().forEach(track => track.stop());
-    screenStreamRef.current = null;
-    setScreenStream(null);
+    if (screenStreamRef.current) {
+      screenStreamRef.current.getTracks().forEach(track => track.stop());
+      screenStreamRef.current = null;
+      setScreenStream(null);
+    }
+    if (systemAudioStreamRef.current) {
+      systemAudioStreamRef.current.getTracks().forEach(track => track.stop());
+      systemAudioStreamRef.current = null;
+      setSystemAudioStream(null);
+    }
   }, []);
 
   const refreshDeviceLists = useCallback(async () => {
-    try {
-      const [{ cameras, microphones }, sources] = await Promise.all([
-        listRecordingDevices(),
-        listDisplaySources(),
-      ]);
+    const [recordingDevicesResult, displaySourcesResult] = await Promise.allSettled([
+      listRecordingDevices(),
+      listDisplaySources(),
+    ]);
+
+    if (recordingDevicesResult.status === 'fulfilled') {
+      const { cameras, microphones } = recordingDevicesResult.value;
       setCameraDevices(cameras);
       setMicrophoneDevices(microphones);
+      setSelectedCameraDeviceId((current) => getSelectedDeviceId(current, cameras));
+      setSelectedMicrophoneDeviceId((current) => getSelectedDeviceId(current, microphones));
+    } else {
+      console.error("Error listing recording devices:", recordingDevicesResult.reason);
+    }
+
+    if (displaySourcesResult.status === 'fulfilled') {
+      const sources = displaySourcesResult.value;
       setDisplaySources(sources);
-      setSelectedCameraDeviceId((current) => current || cameras[0]?.deviceId || '');
-      setSelectedMicrophoneDeviceId((current) => current || microphones[0]?.deviceId || '');
-      setSelectedDisplaySourceId((current) => current || sources[0]?.id || '');
-    } catch (err) {
-      console.error("Error listing recording devices:", err);
+      setSelectedDisplaySourceId((current) => getSelectedSourceId(current, sources));
+    } else {
+      console.error("Error listing display sources:", displaySourcesResult.reason);
     }
   }, []);
 
@@ -164,6 +248,12 @@ export const Recorder: React.FC<RecorderProps> = ({
 
     try {
       const status = await desktopSystem.getScreenAccessStatus();
+      const hasLiveScreenCapture = !!screenStreamRef.current?.getVideoTracks().some((track) => track.readyState !== 'ended');
+      if (hasLiveScreenCapture && (status === 'denied' || status === 'restricted')) {
+        setScreenAccessStatus('granted');
+        return 'granted' as MediaAccessStatus;
+      }
+
       setScreenAccessStatus(status);
       return status;
     } catch (err) {
@@ -188,9 +278,24 @@ export const Recorder: React.FC<RecorderProps> = ({
     setAudioLevel(0);
   }, []);
 
+  const stopMicrophoneStream = useCallback(() => {
+    if (!microphoneStreamRef.current) return;
+    microphoneStreamRef.current.getTracks().forEach(track => track.stop());
+    microphoneStreamRef.current = null;
+    setMicrophoneStream(null);
+    stopAudioVisualizer();
+  }, [stopAudioVisualizer]);
+
   const stopCameraStream = useCallback(() => {
     if (!cameraStreamRef.current) return;
-    cameraStreamRef.current.getTracks().forEach(track => track.stop());
+    const stream = cameraStreamRef.current;
+
+    if (videoRef.current?.srcObject === stream) {
+      videoRef.current.srcObject = null;
+      videoRef.current.load();
+    }
+
+    stream.getTracks().forEach(track => track.stop());
     cameraStreamRef.current = null;
     setCameraStream(null);
     stopAudioVisualizer();
@@ -237,28 +342,23 @@ export const Recorder: React.FC<RecorderProps> = ({
   const setupCamera = async (options: CameraStreamOptions = {}) => {
     try {
       setCameraError(null);
-      setMicrophoneWarning(null);
 
-      const result = await requestCameraStream({
+      const stream = await requestCameraStream({
         cameraDeviceId: options.cameraDeviceId ?? selectedCameraDeviceId,
-        microphoneDeviceId: options.microphoneDeviceId ?? selectedMicrophoneDeviceId,
       });
-      const stream = result.stream;
       cameraStreamRef.current = stream;
       setCameraStream(stream);
-      setMicrophoneWarning(result.audioWarning);
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
+        videoRef.current.load();
         await playPreview(videoRef.current);
       }
 
       stream.getVideoTracks()[0]?.addEventListener('ended', () => {
         cameraStreamRef.current = null;
         setCameraStream(null);
-        stopAudioVisualizer();
       });
 
-      startAudioVisualizer(stream);
       void refreshDeviceLists();
       return true;
     } catch (err) {
@@ -268,34 +368,77 @@ export const Recorder: React.FC<RecorderProps> = ({
     }
   };
 
+  const setupMicrophone = async (deviceId = selectedMicrophoneDeviceId, forceEnabled = false) => {
+    if (!forceEnabled && !microphoneConfig.enabled) return false;
+
+    try {
+      setMicrophoneConfig((current) => ({ ...current, warning: null }));
+      const stream = await requestMicrophoneStream({ microphoneDeviceId: deviceId });
+      microphoneStreamRef.current = stream;
+      setMicrophoneStream(stream);
+      stream.getAudioTracks()[0]?.addEventListener('ended', () => {
+        microphoneStreamRef.current = null;
+        setMicrophoneStream(null);
+        stopAudioVisualizer();
+      });
+      startAudioVisualizer(stream);
+      void refreshDeviceLists();
+      return true;
+    } catch (err) {
+      console.error("Error accessing microphone:", err);
+      setMicrophoneConfig((current) => ({
+        ...current,
+        warning: describeMediaPermissionError(err, 'microphone'),
+      }));
+      return false;
+    }
+  };
+
   const setupScreen = async (options: ScreenStreamOptions = {}) => {
     try {
-      const desktopSystem = window.nektarDesktop?.desktopSystem;
-      const status = await refreshScreenAccessStatus();
+      await refreshScreenAccessStatus();
       setScreenError(null);
+      setSystemAudioConfig((current) => ({ ...current, warning: null }));
 
-      if ((status === 'denied' || status === 'restricted') && desktopSystem?.openScreenRecordingSettings) {
-        await desktopSystem.openScreenRecordingSettings();
-        return false;
-      }
-
-      const stream = await requestScreenStream(isMacOS, {
+      const result = await requestScreenStream(isMacOS, {
         displaySourceId: options.displaySourceId ?? selectedDisplaySourceId,
+        includeSystemAudio: options.includeSystemAudio ?? systemAudioConfig.enabled,
       });
+      const stream = result.videoStream;
 
       setScreenAccessStatus('granted');
       setScreenError(null);
       screenStreamRef.current = stream;
       setScreenStream(stream);
+      if (systemAudioStreamRef.current) {
+        systemAudioStreamRef.current.getTracks().forEach(track => track.stop());
+      }
+      systemAudioStreamRef.current = result.systemAudioStream ?? null;
+      setSystemAudioStream(result.systemAudioStream ?? null);
+      setSystemAudioConfig((current) => ({
+        ...current,
+        warning: result.systemAudioWarning ?? null,
+      }));
+      void refreshDeviceLists();
       if (screenVideoRef.current) {
         screenVideoRef.current.srcObject = stream;
         await playPreview(screenVideoRef.current);
       }
       stream.getVideoTracks()[0].onended = () => {
+        if (isRecordingRef.current || isPausedRef.current) {
+          setScreenError(null);
+          return;
+        }
+
         screenStreamRef.current = null;
         setScreenStream(null);
+        if (systemAudioStreamRef.current) {
+          systemAudioStreamRef.current.getTracks().forEach(track => track.stop());
+          systemAudioStreamRef.current = null;
+          setSystemAudioStream(null);
+        }
         setScreenError(null);
-        if (recordingSource === 'screen' || recordingSource === 'overlay') {
+        if (recordingSourceRef.current === 'screen' || recordingSourceRef.current === 'overlay') {
           setRecordingSource('camera');
         }
       };
@@ -328,9 +471,17 @@ export const Recorder: React.FC<RecorderProps> = ({
     workerRef.current = new Worker(workerUrl);
 
     return () => {
+      if (cameraRestartTimerRef.current) {
+        window.clearTimeout(cameraRestartTimerRef.current);
+        cameraRestartTimerRef.current = null;
+      }
       stopStreams();
       if (timerRef.current) clearInterval(timerRef.current);
       stopAudioVisualizer();
+      if (recordingAudioContextRef.current) {
+        void recordingAudioContextRef.current.close();
+        recordingAudioContextRef.current = null;
+      }
       if (compositionFrameRef.current) cancelAnimationFrame(compositionFrameRef.current);
       if (workerRef.current) {
         workerRef.current.postMessage({ action: 'stop' });
@@ -475,6 +626,64 @@ export const Recorder: React.FC<RecorderProps> = ({
     }, 'image/png');
   };
 
+  const closeRecordingAudioContext = () => {
+    if (recordingAudioContextRef.current) {
+      void recordingAudioContextRef.current.close();
+      recordingAudioContextRef.current = null;
+    }
+  };
+
+  const getAudioGain = (source: RecordingAudioSource) => {
+    const config = source === 'microphone' ? microphoneConfig : systemAudioConfig;
+    if (!config.enabled) return null;
+    return config.muted ? 0 : config.volume;
+  };
+
+  const createMixedAudioTrack = () => {
+    closeRecordingAudioContext();
+
+    const audioSources: Array<{ stream: MediaStream; source: RecordingAudioSource; gain: number }> = [];
+    const microphoneGain = getAudioGain('microphone');
+    const systemGain = getAudioGain('system');
+
+    if (microphoneGain !== null && microphoneStreamRef.current?.getAudioTracks().length) {
+      audioSources.push({ stream: microphoneStreamRef.current, source: 'microphone', gain: microphoneGain });
+    }
+
+    if (systemGain !== null && systemAudioStreamRef.current?.getAudioTracks().length) {
+      audioSources.push({ stream: systemAudioStreamRef.current, source: 'system', gain: systemGain });
+    }
+
+    if (audioSources.length === 0) return null;
+
+    try {
+      const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+      const destination = audioContext.createMediaStreamDestination();
+
+      audioSources.forEach(({ stream, gain }) => {
+        const sourceNode = audioContext.createMediaStreamSource(new MediaStream(stream.getAudioTracks()));
+        const gainNode = audioContext.createGain();
+        gainNode.gain.value = gain;
+        sourceNode.connect(gainNode);
+        gainNode.connect(destination);
+      });
+
+      recordingAudioContextRef.current = audioContext;
+      return destination.stream.getAudioTracks()[0] ?? null;
+    } catch (err) {
+      console.error("Error mixing recording audio:", err);
+      return audioSources.find((entry) => entry.gain > 0)?.stream.getAudioTracks()[0] ?? null;
+    }
+  };
+
+  const createRecordingStream = (videoStream: MediaStream) => {
+    const mixedAudioTrack = createMixedAudioTrack();
+    return new MediaStream([
+      ...videoStream.getVideoTracks(),
+      ...(mixedAudioTrack ? [mixedAudioTrack] : []),
+    ]);
+  };
+
   const startRecording = () => {
     if (trackType === TrackType.IMAGE) {
       takePhoto();
@@ -483,10 +692,10 @@ export const Recorder: React.FC<RecorderProps> = ({
     let streamToRecord: MediaStream | null = null;
 
     if (recordingSource === 'camera') {
-      streamToRecord = cameraStream;
+      streamToRecord = cameraStream ? createRecordingStream(cameraStream) : null;
       if (cameraStream) livePreviewStreamsRef.current.camera = cameraStream;
     } else if (recordingSource === 'screen') {
-      streamToRecord = screenStream;
+      streamToRecord = screenStream ? createRecordingStream(screenStream) : null;
       if (screenStream) livePreviewStreamsRef.current.screen = screenStream;
     } else if (recordingSource === 'overlay') {
       if (!canvasRef.current || !videoRef.current || !screenVideoRef.current) return;
@@ -577,33 +786,8 @@ export const Recorder: React.FC<RecorderProps> = ({
       }
       
       const canvasStream = canvas.captureStream(30);
-      // Add audio from camera/screen
-      const audioTracks: MediaStreamTrack[] = [];
-      if (cameraStream) audioTracks.push(...cameraStream.getAudioTracks());
-      if (screenStream) audioTracks.push(...screenStream.getAudioTracks());
-
-      if (audioTracks.length > 0) {
-        if (audioTracks.length === 1) {
-          canvasStream.addTrack(audioTracks[0]);
-        } else {
-          // Mix multiple audio tracks
-          try {
-            const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
-            const destination = audioCtx.createMediaStreamDestination();
-            
-            audioTracks.forEach(track => {
-              const source = audioCtx.createMediaStreamSource(new MediaStream([track]));
-              source.connect(destination);
-            });
-            
-            canvasStream.addTrack(destination.stream.getAudioTracks()[0]);
-          } catch (err) {
-            console.error("Error mixing audio:", err);
-            // Fallback to just camera audio if mixing fails
-            canvasStream.addTrack(audioTracks[0]);
-          }
-        }
-      }
+      const mixedAudioTrack = createMixedAudioTrack();
+      if (mixedAudioTrack) canvasStream.addTrack(mixedAudioTrack);
       
       streamToRecord = canvasStream;
       livePreviewStreamsRef.current.overlay = canvasStream;
@@ -680,6 +864,7 @@ export const Recorder: React.FC<RecorderProps> = ({
           );
           if (compositionFrameRef.current) cancelAnimationFrame(compositionFrameRef.current);
           if (workerRef.current) workerRef.current.postMessage({ action: 'stop' });
+          closeRecordingAudioContext();
         }
       };
     });
@@ -764,7 +949,7 @@ export const Recorder: React.FC<RecorderProps> = ({
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isRecording, isPaused, cameraStream, screenStream, recordingSource, isActive]);
+  }, [isRecording, isPaused, cameraStream, screenStream, microphoneStream, systemAudioStream, microphoneConfig, systemAudioConfig, recordingSource, isActive]);
 
   const formatDuration = (seconds: number) => {
     const mins = Math.floor(seconds / 60);
@@ -774,12 +959,15 @@ export const Recorder: React.FC<RecorderProps> = ({
 
   const needsScreenSettings =
     (recordingSource === 'screen' || recordingSource === 'overlay') &&
-    (screenAccessStatus === 'denied' || screenAccessStatus === 'restricted');
+    (screenAccessStatus === 'denied' || screenAccessStatus === 'restricted') &&
+    !!screenError;
 
   const isMissingRequiredStream =
     (recordingSource === 'camera' && !cameraStream) ||
     (recordingSource === 'screen' && !screenStream) ||
     (recordingSource === 'overlay' && (!cameraStream || !screenStream));
+  const isRecordingActive = isRecording || isPaused;
+  const shouldShowPermissionOverlay = isMissingRequiredStream && !isRecordingActive;
 
   const handleGrantAccess = async () => {
     setIsRequestingAccess(true);
@@ -802,19 +990,50 @@ export const Recorder: React.FC<RecorderProps> = ({
       await setupCamera();
     }
 
+    if (microphoneConfig.enabled && !microphoneStreamRef.current) {
+      await setupMicrophone();
+    }
+
     setIsRequestingAccess(false);
   };
+
+  useEffect(() => {
+    if (!isSettingsPanelOpen) return;
+
+    const handleSettingsKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setIsSettingsPanelOpen(false);
+      }
+    };
+
+    window.addEventListener('keydown', handleSettingsKeyDown);
+    return () => window.removeEventListener('keydown', handleSettingsKeyDown);
+  }, [isSettingsPanelOpen]);
+
+  useEffect(() => {
+    if (isRecording) setIsSettingsPanelOpen(false);
+  }, [isRecording]);
 
   const selectRecordingSource = (source: RecordingSource) => {
     setRecordingSource(source);
 
     if (source === 'camera' && !cameraStream) {
-      void setupCamera();
+      void (async () => {
+        const grantedCamera = await setupCamera();
+        if (grantedCamera && microphoneConfig.enabled && !microphoneStreamRef.current) {
+          await setupMicrophone();
+        }
+      })();
       return;
     }
 
     if (source === 'screen' && !screenStream) {
-      void setupScreen();
+      void (async () => {
+        const grantedScreen = await setupScreen();
+        if (grantedScreen && microphoneConfig.enabled && !microphoneStreamRef.current) {
+          await setupMicrophone();
+        }
+      })();
       return;
     }
 
@@ -826,7 +1045,12 @@ export const Recorder: React.FC<RecorderProps> = ({
         }
 
         if (!cameraStream) {
-          await setupCamera();
+          const grantedCamera = await setupCamera();
+          if (grantedCamera && microphoneConfig.enabled && !microphoneStreamRef.current) {
+            await setupMicrophone();
+          }
+        } else if (microphoneConfig.enabled && !microphoneStreamRef.current) {
+          await setupMicrophone();
         }
       })();
     }
@@ -838,16 +1062,24 @@ export const Recorder: React.FC<RecorderProps> = ({
     if (!cameraStream || (recordingSource !== 'camera' && recordingSource !== 'overlay')) return;
 
     stopCameraStream();
-    void setupCamera({ cameraDeviceId: deviceId });
+    // Give USB/UVC hardware time to close the previous capture session before
+    // opening the newly selected device. Reopening in the same task can yield a
+    // live-but-black track on devices such as the DJI Osmo Pocket 3.
+    if (cameraRestartTimerRef.current) window.clearTimeout(cameraRestartTimerRef.current);
+    cameraRestartTimerRef.current = window.setTimeout(() => {
+      cameraRestartTimerRef.current = null;
+      void setupCamera({ cameraDeviceId: deviceId });
+    }, 250);
   };
 
   const handleMicrophoneDeviceChange = (deviceId: string) => {
     setSelectedMicrophoneDeviceId(deviceId);
     if (isRecording || isPaused) return;
-    if (!cameraStream || (recordingSource !== 'camera' && recordingSource !== 'overlay')) return;
 
-    stopCameraStream();
-    void setupCamera({ microphoneDeviceId: deviceId });
+    stopMicrophoneStream();
+    if (microphoneConfig.enabled) {
+      void setupMicrophone(deviceId);
+    }
   };
 
   const handleDisplaySourceChange = (sourceId: string) => {
@@ -859,11 +1091,41 @@ export const Recorder: React.FC<RecorderProps> = ({
     void setupScreen({ displaySourceId: sourceId });
   };
 
+  const handleMicrophoneEnabledChange = (enabled: boolean) => {
+    setMicrophoneConfig((current) => ({ ...current, enabled, warning: null }));
+    if (isRecording || isPaused) return;
+
+    if (!enabled) {
+      stopMicrophoneStream();
+      return;
+    }
+
+    void setupMicrophone(selectedMicrophoneDeviceId, true);
+  };
+
+  const handleSystemAudioEnabledChange = (enabled: boolean) => {
+    setSystemAudioConfig((current) => ({ ...current, enabled, warning: null }));
+    if (isRecording || isPaused) return;
+
+    if (!enabled) {
+      if (systemAudioStreamRef.current) {
+        systemAudioStreamRef.current.getTracks().forEach(track => track.stop());
+        systemAudioStreamRef.current = null;
+        setSystemAudioStream(null);
+      }
+      return;
+    }
+
+    if (screenStreamRef.current && (recordingSource === 'screen' || recordingSource === 'overlay')) {
+      stopScreenStream();
+      void setupScreen({ includeSystemAudio: true });
+    }
+  };
+
   const canEditDevices = !isRecording && !isPaused && !isRequestingAccess;
   const showCameraSelector = recordingSource === 'camera' || recordingSource === 'overlay';
-  const showMicrophoneSelector = recordingSource === 'camera' || recordingSource === 'overlay';
   const showDisplaySelector = recordingSource === 'screen' || recordingSource === 'overlay';
-  const hasDesktopDisplaySourcePicker = !!window.nektarDesktop?.desktopSystem?.listDisplaySources;
+  const hasDesktopDisplaySourcePicker = !!window.nektarDesktop?.desktopSystem?.listDisplaySources && displaySources.length > 0;
 
   return (
     <div className="relative w-fit h-full max-h-[400px] flex flex-col bg-[#111] border border-white/10 shadow-2xl overflow-hidden rounded-xl min-h-0">
@@ -911,80 +1173,173 @@ export const Recorder: React.FC<RecorderProps> = ({
           </div>
         </div>
 
-        {(showCameraSelector || showMicrophoneSelector || showDisplaySelector) && (
-          <div className="absolute top-11 left-3 right-3 z-[55] flex flex-wrap items-center gap-1.5 pointer-events-auto">
-            {showCameraSelector && (
-              <select
-                aria-label="Camera device"
-                title="Camera device"
-                value={selectedCameraDeviceId}
-                onChange={(event) => handleCameraDeviceChange(event.target.value)}
-                disabled={!canEditDevices}
-                className="min-w-0 max-w-[150px] bg-black/70 border border-white/10 rounded-md px-2 py-1 text-[10px] text-white outline-none disabled:opacity-50"
-              >
-                {cameraDevices.length === 0 ? (
-                  <option value="">Camera</option>
-                ) : (
-                  cameraDevices.map((device) => (
-                    <option key={device.deviceId || device.label} value={device.deviceId}>
-                      {device.label}
-                    </option>
-                  ))
-                )}
-              </select>
-            )}
-            {showMicrophoneSelector && (
-              <select
-                aria-label="Microphone device"
-                title="Microphone device"
-                value={selectedMicrophoneDeviceId}
-                onChange={(event) => handleMicrophoneDeviceChange(event.target.value)}
-                disabled={!canEditDevices}
-                className="min-w-0 max-w-[160px] bg-black/70 border border-white/10 rounded-md px-2 py-1 text-[10px] text-white outline-none disabled:opacity-50"
-              >
-                {microphoneDevices.length === 0 ? (
-                  <option value="">Microphone</option>
-                ) : (
-                  microphoneDevices.map((device) => (
-                    <option key={device.deviceId || device.label} value={device.deviceId}>
-                      {device.label}
-                    </option>
-                  ))
-                )}
-              </select>
-            )}
-            {showDisplaySelector && hasDesktopDisplaySourcePicker && (
-              <select
-                aria-label="Screen source"
-                title="Screen source"
-                value={selectedDisplaySourceId}
-                onChange={(event) => handleDisplaySourceChange(event.target.value)}
-                disabled={!canEditDevices}
-                className="min-w-0 max-w-[180px] bg-black/70 border border-white/10 rounded-md px-2 py-1 text-[10px] text-white outline-none disabled:opacity-50"
-              >
-                {displaySources.length === 0 ? (
-                  <option value="">Screen/window</option>
-                ) : (
-                  displaySources.map((source) => (
-                    <option key={source.id} value={source.id}>
-                      {source.name}
-                    </option>
-                  ))
-                )}
-              </select>
-            )}
-            {showDisplaySelector && !hasDesktopDisplaySourcePicker && (
-              <button
-                type="button"
-                onClick={() => {
-                  void setupScreen();
-                }}
-                disabled={!canEditDevices}
-                className="bg-black/70 border border-white/10 rounded-md px-2 py-1 text-[10px] text-white transition-colors hover:bg-white/10 disabled:opacity-50"
-              >
-                Choose screen/window/tab...
-              </button>
-            )}
+        <div className="absolute top-11 left-3 z-[55] pointer-events-auto">
+          <button
+            type="button"
+            aria-label="Recording settings"
+            aria-expanded={isSettingsPanelOpen}
+            onClick={() => setIsSettingsPanelOpen((current) => !current)}
+            disabled={isRecording || isPaused}
+            className={`rounded-md border border-white/10 p-1.5 text-white transition-colors disabled:opacity-50 ${isSettingsPanelOpen ? 'bg-blue-600' : 'bg-black/70 hover:bg-white/10'}`}
+            title="Recording settings"
+          >
+            <Settings size={14} />
+          </button>
+        </div>
+
+        {isSettingsPanelOpen && (
+          <div className="absolute top-20 left-3 z-[56] w-[min(360px,calc(100%-24px))] max-h-[calc(100%-6.5rem)] overflow-y-auto overscroll-contain rounded-lg border border-white/10 bg-black/85 p-3 text-white shadow-2xl backdrop-blur-md pointer-events-auto [scrollbar-color:rgba(255,255,255,0.25)_transparent] [scrollbar-width:thin]">
+            <div className="space-y-3">
+              {(showCameraSelector || showDisplaySelector) && (
+                <div className="space-y-2">
+                  <div className="text-[9px] font-bold uppercase tracking-wider text-gray-400">Video</div>
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    {showCameraSelector && (
+                      <select
+                        aria-label="Camera device"
+                        title="Camera device"
+                        value={selectedCameraDeviceId}
+                        onChange={(event) => handleCameraDeviceChange(event.target.value)}
+                        disabled={!canEditDevices}
+                        className="min-w-0 max-w-[220px] bg-black/70 border border-white/10 rounded-md px-2 py-1 text-[10px] text-white outline-none disabled:opacity-50"
+                      >
+                        {cameraDevices.length === 0 ? (
+                          <option value="">Camera</option>
+                        ) : (
+                          cameraDevices.map((device) => (
+                            <option key={device.deviceId || device.label} value={device.deviceId}>
+                              {device.label}
+                            </option>
+                          ))
+                        )}
+                      </select>
+                    )}
+                    {showDisplaySelector && hasDesktopDisplaySourcePicker && (
+                      <select
+                        aria-label="Screen source"
+                        title="Screen source"
+                        value={selectedDisplaySourceId}
+                        onChange={(event) => handleDisplaySourceChange(event.target.value)}
+                        disabled={!canEditDevices}
+                        className="min-w-0 max-w-[240px] bg-black/70 border border-white/10 rounded-md px-2 py-1 text-[10px] text-white outline-none disabled:opacity-50"
+                      >
+                        {displaySources.length === 0 ? (
+                          <option value="">Screen/window</option>
+                        ) : (
+                          displaySources.map((source) => (
+                            <option key={source.id} value={source.id}>
+                              {source.name}
+                            </option>
+                          ))
+                        )}
+                      </select>
+                    )}
+                    {showDisplaySelector && !hasDesktopDisplaySourcePicker && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          void setupScreen();
+                        }}
+                        disabled={!canEditDevices}
+                        className="bg-black/70 border border-white/10 rounded-md px-2 py-1 text-[10px] text-white transition-colors hover:bg-white/10 disabled:opacity-50"
+                      >
+                        Choose screen/window/tab...
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {trackType !== TrackType.IMAGE && (
+                <div className="space-y-2 border-t border-white/10 pt-3">
+                  <div className="text-[9px] font-bold uppercase tracking-wider text-gray-400">Audio</div>
+                  <div className="flex flex-wrap items-center gap-1.5 rounded-md border border-white/10 bg-white/5 px-2 py-1.5 text-[10px] text-white">
+                    <button
+                      type="button"
+                      onClick={() => handleMicrophoneEnabledChange(!microphoneConfig.enabled)}
+                      disabled={!canEditDevices}
+                      className={`p-1 rounded transition-colors disabled:opacity-50 ${microphoneConfig.enabled ? 'bg-blue-600 text-white' : 'bg-white/10 text-gray-400'}`}
+                      title={microphoneConfig.enabled ? 'Disable microphone audio' : 'Enable microphone audio'}
+                    >
+                      <Mic size={12} />
+                    </button>
+                    <select
+                      aria-label="Microphone audio source"
+                      title="Microphone audio source"
+                      value={selectedMicrophoneDeviceId}
+                      onChange={(event) => handleMicrophoneDeviceChange(event.target.value)}
+                      disabled={!canEditDevices || !microphoneConfig.enabled}
+                      className="min-w-0 max-w-[170px] bg-transparent text-[10px] text-white outline-none disabled:opacity-50"
+                    >
+                      {microphoneDevices.length === 0 ? (
+                        <option value="">Microphone</option>
+                      ) : (
+                        microphoneDevices.map((device) => (
+                          <option key={device.deviceId || device.label} value={device.deviceId}>
+                            {device.label}
+                          </option>
+                        ))
+                      )}
+                    </select>
+                    <button
+                      type="button"
+                      onClick={() => setMicrophoneConfig((current) => ({ ...current, muted: !current.muted }))}
+                      disabled={!canEditDevices || !microphoneConfig.enabled}
+                      className="p-1 rounded text-gray-300 hover:bg-white/10 disabled:opacity-50"
+                      title={microphoneConfig.muted ? 'Unmute microphone' : 'Mute microphone'}
+                    >
+                      {microphoneConfig.muted ? <VolumeX size={12} /> : <Volume2 size={12} />}
+                    </button>
+                    <input
+                      aria-label="Microphone audio level"
+                      type="range"
+                      min="0"
+                      max="1"
+                      step="0.01"
+                      value={microphoneConfig.volume}
+                      onChange={(event) => setMicrophoneConfig((current) => ({ ...current, volume: Number(event.target.value) }))}
+                      disabled={!canEditDevices || !microphoneConfig.enabled}
+                      className="w-16 accent-blue-600 disabled:opacity-50"
+                    />
+                    <span className="w-8 text-right text-[9px] text-gray-400">{Math.round(microphoneConfig.volume * 100)}%</span>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-1.5 rounded-md border border-white/10 bg-white/5 px-2 py-1.5 text-[10px] text-white">
+                    <button
+                      type="button"
+                      onClick={() => handleSystemAudioEnabledChange(!systemAudioConfig.enabled)}
+                      disabled={!canEditDevices}
+                      className={`p-1 rounded transition-colors disabled:opacity-50 ${systemAudioConfig.enabled ? 'bg-blue-600 text-white' : 'bg-white/10 text-gray-400'}`}
+                      title={systemAudioConfig.enabled ? 'Disable system audio' : 'Enable system audio'}
+                    >
+                      <Monitor size={12} />
+                    </button>
+                    <span className="text-[10px] font-medium text-gray-200">System audio</span>
+                    <button
+                      type="button"
+                      onClick={() => setSystemAudioConfig((current) => ({ ...current, muted: !current.muted }))}
+                      disabled={!canEditDevices || !systemAudioConfig.enabled || !systemAudioStream}
+                      className="p-1 rounded text-gray-300 hover:bg-white/10 disabled:opacity-50"
+                      title={systemAudioConfig.muted ? 'Unmute system audio' : 'Mute system audio'}
+                    >
+                      {systemAudioConfig.muted ? <VolumeX size={12} /> : <Volume2 size={12} />}
+                    </button>
+                    <input
+                      aria-label="System audio level"
+                      type="range"
+                      min="0"
+                      max="1"
+                      step="0.01"
+                      value={systemAudioConfig.volume}
+                      onChange={(event) => setSystemAudioConfig((current) => ({ ...current, volume: Number(event.target.value) }))}
+                      disabled={!canEditDevices || !systemAudioConfig.enabled || !systemAudioStream}
+                      className="w-16 accent-blue-600 disabled:opacity-50"
+                    />
+                    <span className="w-8 text-right text-[9px] text-gray-400">{Math.round(systemAudioConfig.volume * 100)}%</span>
+                  </div>
+                </div>
+              )}
+            </div>
           </div>
         )}
 
@@ -1017,7 +1372,7 @@ export const Recorder: React.FC<RecorderProps> = ({
         />
 
         {/* Permission Overlay */}
-        {isMissingRequiredStream && (
+        {shouldShowPermissionOverlay && (
           <div className="absolute inset-0 z-50 bg-black/80 backdrop-blur-sm flex flex-col items-center justify-center p-6 text-center">
             <div className="w-12 h-12 bg-blue-500/20 rounded-2xl flex items-center justify-center mb-4 border border-blue-500/30">
               {recordingSource === 'camera' ? <Camera size={24} className="text-blue-400" /> : <Monitor size={24} className="text-blue-400" />}
@@ -1090,9 +1445,15 @@ export const Recorder: React.FC<RecorderProps> = ({
           })}
         </div>
 
-        {microphoneWarning && !isMissingRequiredStream && (
+        {microphoneConfig.warning && !shouldShowPermissionOverlay && (
           <div className="absolute bottom-3 right-3 z-40 max-w-[220px] bg-amber-950/80 px-2 py-1 rounded-md border border-amber-500/30 text-[9px] text-amber-100">
-            {microphoneWarning}
+            {microphoneConfig.warning}
+          </div>
+        )}
+
+        {systemAudioConfig.warning && !shouldShowPermissionOverlay && (
+          <div className="absolute bottom-12 right-3 z-40 max-w-[240px] bg-amber-950/80 px-2 py-1 rounded-md border border-amber-500/30 text-[9px] text-amber-100">
+            {systemAudioConfig.warning}
           </div>
         )}
 
@@ -1111,8 +1472,8 @@ export const Recorder: React.FC<RecorderProps> = ({
           {!isRecording && !isPaused ? (
             <button
               onClick={startRecording}
-              disabled={!isArmed || isMissingRequiredStream}
-              className={`group flex items-center space-x-2 ${trackType === TrackType.IMAGE ? 'bg-amber-600 hover:bg-amber-700 shadow-amber-600/20' : 'bg-red-600 hover:bg-red-700 shadow-red-600/20'} ${(!isArmed || isMissingRequiredStream) ? 'opacity-30 cursor-not-allowed' : 'opacity-90 hover:opacity-100'} text-white px-4 py-1.5 rounded-full transition-all hover:scale-105 shadow-lg`}
+              disabled={!isArmed || shouldShowPermissionOverlay}
+              className={`group flex items-center space-x-2 ${trackType === TrackType.IMAGE ? 'bg-amber-600 hover:bg-amber-700 shadow-amber-600/20' : 'bg-red-600 hover:bg-red-700 shadow-red-600/20'} ${(!isArmed || shouldShowPermissionOverlay) ? 'opacity-30 cursor-not-allowed' : 'opacity-90 hover:opacity-100'} text-white px-4 py-1.5 rounded-full transition-all hover:scale-105 shadow-lg`}
               title={!isArmed ? "Track must be armed to record" : isMissingRequiredStream ? "Recording permission required" : ""}
             >
               {trackType === TrackType.IMAGE ? <Camera size={12} fill="currentColor" /> : <Circle size={8} fill="currentColor" />}

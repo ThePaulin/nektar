@@ -1,5 +1,8 @@
 import path from 'node:path';
 import { createRequire } from 'node:module';
+import { createReadStream } from 'node:fs';
+import { stat } from 'node:fs/promises';
+import { createServer, type Server, type ServerResponse } from 'node:http';
 import {
   cancelDesktopExport,
   cleanupStaleDesktopExports,
@@ -43,8 +46,8 @@ const { app, BrowserWindow, desktopCapturer, dialog, ipcMain, session, shell, sy
     defaultSession: {
       setDisplayMediaRequestHandler(
         handler: (
-          request: unknown,
-          callback: (streams: { video?: { id: string; name: string } }) => void,
+          request: { audioRequested?: boolean },
+          callback: (streams: { video?: { id: string; name: string }; audio?: 'loopback' }) => void,
         ) => void | Promise<void>,
         options?: { useSystemPicker?: boolean },
       ): void;
@@ -88,17 +91,118 @@ const macScreenRecordingSettingsUrl =
   'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture';
 const capturablePermissions = new Set(['media', 'display-capture']);
 let selectedDisplaySourceId: string | null = null;
+let packagedRendererOrigin: string | null = null;
+let packagedRendererServer: Server | null = null;
+
+const rendererMimeTypes = new Map([
+  ['.css', 'text/css; charset=utf-8'],
+  ['.gif', 'image/gif'],
+  ['.html', 'text/html; charset=utf-8'],
+  ['.ico', 'image/x-icon'],
+  ['.js', 'text/javascript; charset=utf-8'],
+  ['.json', 'application/json; charset=utf-8'],
+  ['.map', 'application/json; charset=utf-8'],
+  ['.png', 'image/png'],
+  ['.svg', 'image/svg+xml'],
+  ['.wasm', 'application/wasm'],
+  ['.webp', 'image/webp'],
+]);
 
 function isTrustedRendererUrl(url: string | undefined) {
   if (!url) return false;
 
   try {
     const parsed = new URL(url);
+    if (packagedRendererOrigin && parsed.origin === packagedRendererOrigin) return true;
     if (parsed.protocol === 'file:') return !isDevelopment;
     return parsed.origin === new URL(rendererUrl).origin;
   } catch {
     return false;
   }
+}
+
+function sendRendererFile(res: ServerResponse, filePath: string) {
+  res.statusCode = 200;
+  res.setHeader('Content-Type', rendererMimeTypes.get(path.extname(filePath)) || 'application/octet-stream');
+  createReadStream(filePath).on('error', () => {
+    if (!res.headersSent) {
+      res.statusCode = 500;
+    }
+    res.end();
+  }).pipe(res);
+}
+
+async function resolveRendererFile(pathname: string) {
+  const distDir = resolveAppFile('dist');
+  const decodedPath = decodeURIComponent(pathname);
+  const requestedPath = decodedPath === '/' ? 'index.html' : decodedPath.replace(/^[/\\]+/, '');
+  const candidatePath = path.join(distDir, path.normalize(requestedPath));
+  const relativePath = path.relative(distDir, candidatePath);
+
+  if (relativePath.startsWith('..') || path.isAbsolute(relativePath)) {
+    return null;
+  }
+
+  try {
+    const fileStats = await stat(candidatePath);
+    if (fileStats.isFile()) return candidatePath;
+  } catch {
+    // Fall through to the SPA entry point for client-side routes.
+  }
+
+  return path.join(distDir, 'index.html');
+}
+
+async function startPackagedRendererServer() {
+  if (packagedRendererOrigin) return packagedRendererOrigin;
+
+  packagedRendererServer = createServer((req, res) => {
+    if (!req.url) {
+      res.statusCode = 400;
+      res.end();
+      return;
+    }
+
+    void (async () => {
+      const url = new URL(req.url || '/', 'http://127.0.0.1');
+      const filePath = await resolveRendererFile(url.pathname);
+      if (!filePath) {
+        res.statusCode = 403;
+        res.end();
+        return;
+      }
+
+      sendRendererFile(res, filePath);
+    })().catch((error) => {
+      console.error('[Desktop] Failed to serve renderer asset:', error);
+      if (!res.headersSent) {
+        res.statusCode = 500;
+      }
+      res.end();
+    });
+  });
+
+  await new Promise<void>((resolve, reject) => {
+    const server = packagedRendererServer;
+    if (!server) {
+      reject(new Error('Renderer server was not initialized.'));
+      return;
+    }
+
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      server.off('error', reject);
+      resolve();
+    });
+  });
+
+  const address = packagedRendererServer.address();
+  if (!address || typeof address === 'string') {
+    throw new Error('Renderer server did not bind to a local TCP port.');
+  }
+
+  packagedRendererOrigin = `http://127.0.0.1:${address.port}`;
+  return packagedRendererOrigin;
 }
 
 function isTrustedPermissionRequest(
@@ -147,6 +251,8 @@ async function createWindow() {
 
   if (isDevelopment && await canLoadRendererDevUrl()) {
     await win.loadURL(rendererUrl);
+  } else if (app.isPackaged) {
+    await win.loadURL(await startPackagedRendererServer());
   } else {
     await win.loadFile(resolveAppFile('dist', 'index.html'));
   }
@@ -162,15 +268,20 @@ app.whenReady().then(async () => {
     return isTrustedPermissionRequest(webContents, permission, details);
   });
   session.defaultSession.setDisplayMediaRequestHandler(
-    async (_request, callback) => {
-      const sources = await desktopCapturer.getSources({ types: ['screen', 'window'] });
-      const requestedSource = selectedDisplaySourceId
-        ? sources.find((source) => source.id === selectedDisplaySourceId)
-        : null;
-      const source = requestedSource ?? sources[0];
-      callback(source ? { video: source } : {});
+    async (request, callback) => {
+      try {
+        const sources = await desktopCapturer.getSources({ types: ['screen', 'window'] });
+        const requestedSource = selectedDisplaySourceId
+          ? sources.find((source) => source.id === selectedDisplaySourceId)
+          : null;
+        const source = requestedSource ?? sources[0];
+        callback(source ? { video: source, ...(request.audioRequested ? { audio: 'loopback' as const } : {}) } : {});
+      } catch (error) {
+        console.error('[Desktop] Failed to get display media sources:', error);
+        callback({});
+      }
     },
-    { useSystemPicker: false },
+    { useSystemPicker: true },
   );
 
   ipcMain.handle('desktop-export:is-available', () => isFfmpegAvailable());
